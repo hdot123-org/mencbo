@@ -7,15 +7,21 @@ Thanks for your interest in improving MenCbo.
 ```bash
 git clone https://github.com/hdot123-org/mencbo.git
 cd mencbo
-npm install
-npm test
+pnpm install
+pnpm -F mencbo run test
 ```
 
 ## Before opening a pull request
 
-1. `npm run typecheck` passes.
-2. `npm test` passes (add tests for any new behavior).
-3. `npm run build` succeeds.
+Changes under `packages/mencbo/`:
+
+1. `pnpm -F mencbo run typecheck` passes.
+2. `pnpm -F mencbo run test` passes (add tests for any new behavior).
+3. `pnpm -F mencbo run build` succeeds.
+
+Changes under `apps/desktop/daemon/`:
+
+1. `uv sync` then `uv run pytest` passes (add tests for any new behavior).
 4. No new runtime dependencies — the zero-dependency core is a design guarantee.
 5. Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/) (e.g. `feat:`, `fix:`, `docs:`).
 
