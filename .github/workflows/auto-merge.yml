@@ -1,0 +1,60 @@
+name: Auto Merge
+
+# Thin caller：触发面 + 事件门控 + concurrency 留在本地（github 事件上下文只在
+# caller 求值），resolve + triage + merge 执行体委托 infra-core
+# auto-merge-pipeline.yml@v0.13.0。
+#
+# 为什么 workflow_run 而非 check_run（INFRA-212）：GitHub 不把 Actions 产生的
+# check_run/check_suite 事件投递给其他 workflow，check_run: completed 实际永不
+# 触发。正确做法：workflow_run（快速路径）+ schedule（每 10 分钟兜底）+
+# pull_request_target（打开/更新即试）+ workflow_dispatch（手动）。
+# 零红铁律：全绿判定 = PR head 全部 check-runs 零 fail（含 advisory 层）。
+
+on:
+  workflow_run:
+    workflows: ["CI", "Evolution Governance"]
+    types: [completed]
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to merge (empty = sweep all open PRs)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+# INFRA-428：组级排队不取消进行中的腿，同一时刻至多一条流水在处理，
+# update-branch/冲突评论的双发竞态窗口自然消失。
+concurrency:
+  group: auto-merge-pipeline
+  cancel-in-progress: false
+
+jobs:
+  auto-merge:
+    # 事件门控归 caller：workflow_run 仅在结论 success 时尝试合并。
+    # 调用 job 权限 = callee 所需集合（startup 子集校验，缺声明即
+    # startup_failure 零 job，INFRA-613 教训）。
+    if: |
+      github.event_name == 'pull_request_target' ||
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    uses: hdot123-org/infra-core/.github/workflows/auto-merge-pipeline.yml@v0.13.0
+    permissions:
+      contents: write
+      pull-requests: write
+      checks: read
+      actions: read
+    secrets:
+      # 铁律：合并必须用 DISPATCH_TOKEN（PAT，不受 GitHub 递归防护抑制），
+      # 不能用 GITHUB_TOKEN——其触发的 push 事件被抑制会打断下游监听链。
+      # snake_case 单形态（M5 R1(3) 终态）。
+      dispatch_token: ${{ secrets.DISPATCH_TOKEN }}

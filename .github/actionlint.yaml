@@ -1,0 +1,5 @@
+self-hosted-runner:
+  # 自建 runner label，actionlint 内置清单不认识，需显式声明：
+  # - pve-linux: org 级 Linux runner（pve-runner-01 / pve-runner-02）
+  labels:
+    - pve-linux
