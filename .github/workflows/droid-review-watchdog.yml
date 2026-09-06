@@ -1,0 +1,150 @@
+# Droid Review Watchdog — thin caller（对齐 memory 仓形态，gate-watchdog-automerge）
+# self-heal-rerun / cancel-on-ci-fail 两 handler 委托 infra-core reusable workflow
+# （droid-review-watchdog-handlers.yml@v0.14.0）；quota-sweep 留在本地 job。
+#
+# 契约（NEVER break，VAL-GATE-107）：
+#   1. Workflow 名 "Droid Review Watchdog"
+#   2. workflow_run 监听名 ["Droid Auto Review", "CI"] + types [completed]（字节级）
+#   3. 两个 handler job 的 if 守卫含精确名比较（github 事件上下文只在 caller 求值）
+#   4. quota-sweep 的 startswith("droid-review-debug-") 前缀过滤与
+#      name == "Droid Auto Review" run 名过滤保留在本文件
+#   5. schedule '*/30 * * * *'
+#   6. concurrency 组 droid-review-watchdog-${{ github.event.workflow_run.id }}
+#
+# 职责 1（self-heal-rerun）：droid-action prep 阶段 GitHub API 503 时自动 rerun。
+# 职责 2（cancel-on-ci-fail）：CI 失败时取消同 head SHA 上仍在跑的 droid-review
+# （BYOK token 不空烧）。门禁语义：watchdog 只请求 rerun/cancel，不改变任何
+# check 结论，失败轮保持 failure 结算（fail-closed）。
+# 职责 3（quota-sweep）：BYOK 429 配额耗尽自愈——扫描失败 run 的 debug artifact
+# transcript，命中 429 特征且过恢复窗口后 rerun-failed-jobs；run_attempt 限界
+# 防风暴。
+
+name: Droid Review Watchdog
+
+on:
+  workflow_run:
+    workflows: ["Droid Auto Review", "CI"]
+    types: [completed]
+  schedule:
+    - cron: '*/30 * * * *'
+
+permissions:
+  actions: write
+
+concurrency:
+  group: droid-review-watchdog-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  self-heal-rerun:
+    # 仅处理 Droid Auto Review 的失败 run；run_attempt 限界防止 rerun 风暴
+    # WATCHDOG_MAX_ATTEMPT repo variable（缺失时回退默认值 3，日志记录）。
+    if: >
+      github.event.workflow_run.name == 'Droid Auto Review' &&
+      github.event.workflow_run.conclusion == 'failure'
+    uses: hdot123-org/infra-core/.github/workflows/droid-review-watchdog-handlers.yml@v0.14.0
+    permissions:
+      actions: write
+    with:
+      mode: self-heal-rerun
+      # snake_case 单形态（M5 R1(3) 终态）。不得恢复 hyphen 双写：
+      # callee 声明面严格校验拒绝未声明多余键。
+      run_id: ${{ github.event.workflow_run.id }}
+      run_attempt: ${{ github.event.workflow_run.run_attempt }}
+      head_sha: ${{ github.event.workflow_run.head_sha }}
+      max_attempt: ${{ vars.WATCHDOG_MAX_ATTEMPT || '3' }}
+
+  cancel-on-ci-fail:
+    # CI（test 门禁）失败 → 取消同 head SHA 上仍在跑的 droid-review。
+    # 合并门禁语义不变（required checks 仍阻止合并；修复 push 后
+    # droid-review 由 pull_request_target 重新触发）。
+    if: >
+      github.event.workflow_run.name == 'CI' &&
+      github.event.workflow_run.conclusion == 'failure'
+    uses: hdot123-org/infra-core/.github/workflows/droid-review-watchdog-handlers.yml@v0.14.0
+    permissions:
+      actions: write
+    with:
+      mode: cancel-on-ci-fail
+      run_id: ${{ github.event.workflow_run.id }}
+      run_attempt: ${{ github.event.workflow_run.run_attempt }}
+      head_sha: ${{ github.event.workflow_run.head_sha }}
+
+  quota-sweep:
+    # 职责 3：BYOK 429 配额耗尽自愈。只在 schedule 触发时运行，避免
+    # workflow_run 事件误入（配额耗尽时立即 rerun 无意义，必须等恢复窗口）。
+    # 留在本地的原因（VAL-GATE-107）：artifact 前缀过滤（droid-review-debug-）
+    # 与 run 名过滤（Droid Auto Review）契约必须保留在本文件可断言。
+    if: github.event_name == 'schedule'
+    runs-on: [self-hosted, pve-linux]
+    timeout-minutes: 10
+    steps:
+      - name: Rerun quota-exhausted droid-review after recovery window
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          QUOTA_SCAN_WINDOW_HOURS: ${{ vars.QUOTA_SCAN_WINDOW_HOURS }}
+          QUOTA_RECOVERY_WINDOW_SECONDS: ${{ vars.QUOTA_RECOVERY_WINDOW_SECONDS }}
+          WATCHDOG_MAX_ATTEMPT: ${{ vars.WATCHDOG_MAX_ATTEMPT }}
+        run: |
+          set -eu
+          # repo variable fallback（变量缺失时使用默认值并打日志）
+          if [ -z "${QUOTA_SCAN_WINDOW_HOURS:-}" ]; then QUOTA_SCAN_WINDOW_HOURS=6; echo "变量 QUOTA_SCAN_WINDOW_HOURS 未设置、使用默认值 6"; fi
+          if [ -z "${QUOTA_RECOVERY_WINDOW_SECONDS:-}" ]; then QUOTA_RECOVERY_WINDOW_SECONDS=1800; echo "变量 QUOTA_RECOVERY_WINDOW_SECONDS 未设置、使用默认值 1800"; fi
+          if [ -z "${WATCHDOG_MAX_ATTEMPT:-}" ]; then WATCHDOG_MAX_ATTEMPT=3; echo "变量 WATCHDOG_MAX_ATTEMPT 未设置、使用默认值 3"; fi
+          echo "Scanning recent failed 'Droid Auto Review' runs for BYOK quota exhaustion..."
+          CUTOFF=$(date -u -d "${QUOTA_SCAN_WINDOW_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)
+          FAILED_RUNS=$(gh api "repos/$REPO/actions/runs?status=failure&per_page=50" --paginate --jq ".workflow_runs[] | select(.name == \"Droid Auto Review\" and .updated_at > \"$CUTOFF\") | .id")
+          if [ -z "$FAILED_RUNS" ]; then
+            echo "No failed Droid Auto Review runs in window. Nothing to do."
+            exit 0
+          fi
+          RERUNNED=0
+          for RUN_ID in $FAILED_RUNS; do
+            # run_attempt 限界防 rerun 风暴（与 self-heal-rerun 一致）
+            ATTEMPT=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq '.run_attempt')
+            if [ "$ATTEMPT" -ge "$WATCHDOG_MAX_ATTEMPT" ]; then
+              echo "Run $RUN_ID already at attempt $ATTEMPT (>=$WATCHDOG_MAX_ATTEMPT). Skipping; needs manual attention."
+              continue
+            fi
+            # 恢复窗口：run 结束超过 ${QUOTA_RECOVERY_WINDOW_SECONDS}s 才重试（配额未恢复时 rerun 会快速再死）
+            UPDATED_AT=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq '.updated_at')
+            AGE_SEC=$(( $(date -u +%s) - $(date -u -d "$UPDATED_AT" +%s) ))
+            if [ "$AGE_SEC" -lt "$QUOTA_RECOVERY_WINDOW_SECONDS" ]; then
+              echo "Run $RUN_ID failed ${AGE_SEC}s ago (<${QUOTA_RECOVERY_WINDOW_SECONDS}s recovery window). Skipping this sweep."
+              continue
+            fi
+            # 429 特征检测：真实报错只在 debug artifact 的 session transcript 里，
+            # job log 只有无差别的 "exited with code 1"
+            ARTIFACT_NAME=$(gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq '.artifacts[] | select(.name | startswith("droid-review-debug-")) | .name' | head -1)
+            if [ -z "$ARTIFACT_NAME" ]; then
+              echo "Run $RUN_ID has no debug artifact. Cannot classify; skipping."
+              continue
+            fi
+            rm -rf /tmp/quota-check && mkdir -p /tmp/quota-check
+            if ! gh api "repos/$REPO/actions/runs/$RUN_ID/artifacts" --jq ".artifacts[] | select(.name == \"$ARTIFACT_NAME\") | .archive_download_url" | head -1 | xargs -I{} gh api {} > /tmp/quota-check/artifact.zip; then
+              echo "::warning::Failed to download artifact for run $RUN_ID. Skipping."
+              continue
+            fi
+            cd /tmp/quota-check
+            # unzip 优先；runner 未预装时回退 python3 -m zipfile（best-effort）
+            if command -v unzip >/dev/null 2>&1; then
+              unzip -q artifact.zip
+            else
+              python3 -m zipfile -e artifact.zip .
+            fi
+            # grep transcript：BYOK Error: 429 usage allocated quota exceeded
+            if grep -rIl "quota exceeded" .factory/sessions/ >/dev/null 2>&1; then
+              echo "Run $RUN_ID: BYOK quota exhaustion confirmed (429 in transcript). Requesting rerun..."
+              if gh api -X POST "repos/$REPO/actions/runs/$RUN_ID/rerun-failed-jobs"; then
+                echo "Rerun requested. The rerun carries the effective review."
+                RERUNNED=$((RERUNNED + 1))
+              else
+                echo "::warning::Rerun request failed for run $RUN_ID."
+              fi
+            else
+              echo "Run $RUN_ID: no quota signature in transcript. Not quota-related; no auto-rerun."
+            fi
+            cd - >/dev/null
+          done
+          echo "Done. Rerun requested for $RERUNNED run(s)."

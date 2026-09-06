@@ -1,0 +1,95 @@
+# Droid Auto Review — thin caller（对齐 memory 仓形态，gate-droid-review）
+# 分片流水线委托 infra-core reusable workflow；聚合 job 留在本地跑 composite。
+#
+# Three contracts (NEVER break):
+#   1. Workflow name: "Droid Auto Review"（auto-merge/watchdog workflow_run 依赖）
+#   2. Aggregation job key: "droid-review" —— 本地 job，跑 composite action
+#      （reusable 内部 job 的 check 名是 `外层/内层` 嵌套格式；精确名 `droid-review`
+#      的 check 只能由本地 job 产出，branch-protection/ci-ok 依赖精确名匹配）
+#   3. Artifact prefix: "droid-review-debug-"（watchdog quota-sweep 依赖；
+#      由 reusable workflow 的 review-shard 上传，前缀契约在 infra-core 模板测试钉住）
+#
+# Security: pull_request_target + dual checkout（BASE 取脚本/prompt，HEAD 取上下文）。
+# 分片 job 在 infra-core reusable workflow（[self-hosted, pve-linux]，与 infra-core
+# 自仓 droid-review 生产形态一致，共享 memory-runnerz 池）；BYOM ts 内网直达 Kong。
+#
+# Budget layers（VAL-SHARD-011，vars 在 caller 引用后经 inputs 转发）：
+#   Layer 1: shard job timeout = SHARD_TIMEOUT_MINUTES（默认 45）
+#   Layer 2: aggregation path timeout = DROID_REVIEW_TIMEOUT_MINUTES（默认 90，本地保留）
+#   Layer 3: shard size cap = SHARD_MAX_FILES / SHARD_MAX_COUNT
+#   Layer 4: concurrency cap = SHARD_MAX_PARALLEL
+#   Layer 5: prompt budget instructions（引擎 prompt 模板内嵌）
+
+name: Droid Auto Review
+
+on:
+  pull_request_target:
+    types: [opened, ready_for_review, reopened, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: number
+      head_sha:
+        description: 'Head commit SHA (optional, defaults to PR head)'
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || inputs.pr_number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 分片流水线（setup / plan-shards / review-shard matrix → infra-core 引擎）──
+  # permissions：被调 workflow 的 job 只能获得调用 job 权限的子集（GitHub startup
+  # 校验，缺失即 run startup_failure 零 job）。授权集：contents: read +
+  # actions: write + id-token: write + pull-requests: read。
+  shards:
+    uses: hdot123-org/infra-core/.github/workflows/droid-review-shards.yml@v0.14.0
+    permissions:
+      contents: read
+      actions: write
+      id-token: write
+      pull-requests: read
+    with:
+      pr_number: ${{ inputs.pr_number }}
+      head_sha: ${{ inputs.head_sha }}
+      # 预算 inputs：snake_case 单形态（M5 R1(3) 终态，对齐 infra-core #82/#86）。
+      # 不得恢复 hyphen 双写：callee 对 with:/secrets: 键做声明面严格校验，未声明
+      # 多余键一律拒绝（2026-08-30 startup_failure 实证）。单形态在 callee 任一
+      # 形态下都合法，终态收敛 snake-only。
+      shard_max_files: ${{ vars.SHARD_MAX_FILES || '25' }}
+      shard_max_count: ${{ vars.SHARD_MAX_COUNT || '6' }}
+      shard_timeout_minutes: ${{ vars.SHARD_TIMEOUT_MINUTES || '45' }}
+      shard_max_parallel: ${{ vars.SHARD_MAX_PARALLEL || '3' }}
+    secrets:
+      FACTORY_API_KEY: ${{ secrets.FACTORY_API_KEY }}
+      NVIDIA_KONG_PROXY_KEY: ${{ secrets.NVIDIA_KONG_PROXY_KEY }}
+
+  # ── 聚合与发布（本地 job：check 名 `droid-review` 精确契约承载体）──
+  # if 语义 = 旧 `always() && needs.plan-shards.result == 'success'`：
+  #   plan-shards skipped（draft/dependabot）或 failure → plan_shards_ok 为空 → 本 job
+  #   skipped（check_droid_review.sh 对非 dependabot 的 skipped 判 BLOCK，fail-closed 不变）；
+  #   docs-only → shards 成功 → 本 job 运行 → composite 内 should_publish=false → check success
+  #   （VAL-DRSKIP-005）；分片失败 → shards result=failure → composite fail-closed exit 1。
+  droid-review:
+    needs: [shards]
+    if: always() && needs.shards.outputs.plan_shards_ok == 'true'
+    runs-on: [self-hosted, pve-linux]
+    timeout-minutes: ${{ fromJSON(vars.DROID_REVIEW_TIMEOUT_MINUTES || '90') }}
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      actions: read
+    steps:
+      - name: Aggregate and publish findings
+        uses: hdot123-org/infra-core/actions/droid-review-aggregate@v0.14.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          pr-number: ${{ needs.shards.outputs.pr_number }}
+          head-sha: ${{ needs.shards.outputs.head_sha }}
+          docs-only: ${{ needs.shards.outputs.docs_only }}
+          shards: ${{ needs.shards.outputs.shards }}
+          shards-result: ${{ needs.shards.result }}
