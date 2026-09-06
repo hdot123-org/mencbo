@@ -1,0 +1,50 @@
+{
+  "name": "mencbo",
+  "version": "0.1.0",
+  "description": "Client-side layered memory engine for AI apps. Isomorphic TypeScript, zero dependencies.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "memory",
+    "memory-engine",
+    "agent",
+    "ai",
+    "client-side",
+    "knowledge-base",
+    "isomorphic",
+    "layered-memory"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hdot123-org/mencbo.git",
+    "directory": "packages/mencbo"
+  },
+  "bugs": {
+    "url": "https://github.com/hdot123-org/mencbo/issues"
+  },
+  "homepage": "https://github.com/hdot123-org/mencbo#readme",
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

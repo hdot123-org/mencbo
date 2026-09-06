@@ -21,3 +21,13 @@ Thumbs.db
 # Editor
 .idea/
 .vscode/
+
+# Python (apps/desktop/daemon)
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
