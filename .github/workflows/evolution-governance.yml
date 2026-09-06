@@ -1,0 +1,28 @@
+# Evolution Governance thin caller
+# 命名契约（NEVER break）：workflow 名 "Evolution Governance"、job 显示名
+# "Block non-owner governance modifications"（branch protection required check
+# 的精确名，字节级契约）。
+
+name: Evolution Governance
+
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  governance-check:
+    name: Block non-owner governance modifications
+    # INFRA-569 安全边界：pull_request_target + secrets 的 job 保持 GitHub-hosted，
+    # 不下放到自建 runner（PR 代码对持久化多租户环境是攻击面）。
+    runs-on: ubuntu-latest
+    steps:
+      - name: Governance check
+        uses: hdot123-org/infra-core/actions/governance-check@v0.13.0
+        with:
+          owner-login: hdot123
+          protected-patterns: '.evolution/**,scripts/**,.github/workflows/evolution-*.yml,.github/CODEOWNERS'
+          github-token: ${{ secrets.GITHUB_TOKEN }}

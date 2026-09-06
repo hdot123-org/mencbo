@@ -1,0 +1,30 @@
+# Evolution Heartbeat thin caller（消费仓，对齐 hdot123-org/memory 在产版本）
+# 命名契约（NEVER break）：name: Evolution Heartbeat 与 cron '47 */2 * * *'
+# （INFRA-578 错峰）。INFRA-588：本 workflow 被 drop 时，扫描器
+# watch_heartbeat_channel 会 workflow_dispatch 反向拉起本文件。
+
+name: Evolution Heartbeat
+
+on:
+  schedule:
+    - cron: '47 */2 * * *'  # Every 2 hours at minute 47 (off-peak, INFRA-578)
+  workflow_dispatch: {}
+
+concurrency:
+  group: evolution-heartbeat
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  heartbeat:
+    # INFRA-651: reusable 引用钉 tag，与引擎版本对齐
+    uses: hdot123-org/infra-core/.github/workflows/evolution-heartbeat.yml@v0.13.0
+    permissions:
+      contents: read
+      issues: write
+    secrets:
+      # snake_case 单形态（M5 R1(3) 终态）
+      dispatch_token: ${{ secrets.DISPATCH_TOKEN }}

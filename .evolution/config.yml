@@ -1,0 +1,19 @@
+# Human-maintained governance config. Scanner reads only, never writes.
+max_issues_per_tick: 1
+max_self_audit_issues_per_tick: 1
+max_code_hygiene_issues_per_tick: 1
+severity_order: [critical, warning, info]
+dedup_label: evolution-found
+isolation_threshold: 3
+failure_label: evolution-isolated
+# 引擎工具由 infra-core memory rule pack 提供（infra-* 入口随 scanner venv
+# 安装）。mencbo 仓内无 memory/ kb 结构：按名覆盖禁用 kb 结构类审计，
+# 保留通用审计（code_hygiene_audit / error_patterns / evolution_self_audit）。
+rule_packs:
+  - pack: memory
+audit_tools:
+  - name: daily_kb_audit
+    enabled: false
+  - name: audit_layout
+    enabled: false
+snapshot_limit: 100
