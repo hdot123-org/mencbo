@@ -21,7 +21,7 @@ permissions:
 jobs:
   scan:
     # INFRA-651: reusable 引用钉 tag，与引擎版本对齐，升级走 pin bump PR
-    uses: hdot123-org/infra-core/.github/workflows/evolution-scan.yml@v0.13.0
+    uses: hdot123-org/infra-core/.github/workflows/evolution-scan.yml@v0.14.0
     permissions:
       contents: read
       issues: write
