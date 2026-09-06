@@ -101,7 +101,7 @@ await engine.update(someId, { content: 'blind write' }) // throws ConflictError
 await engine.update(someId, { content: 'forced' }, { force: true })
 ```
 
-If another tab changed the entry since your read, `ifMatch` no longer matches and you get a `ConflictError` instead of silently clobbering the update. Deletes follow the same rule.
+If another tab changed the entry since your read, `ifMatch` no longer matches and you get a `ConflictError` instead of silently clobbering the update. Deletes follow the same rule. Update tokens are strictly monotonic — even two updates within the same millisecond produce different tokens, so a stale token is always detected.
 
 ## Ownership guard
 

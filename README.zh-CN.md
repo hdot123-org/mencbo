@@ -101,7 +101,7 @@ await engine.update(someId, { content: '盲写' }) // 抛出 ConflictError
 await engine.update(someId, { content: '强制写入' }, { force: true })
 ```
 
-如果你读取之后另一个标签页改了条目，`ifMatch` 不再匹配，你会得到 `ConflictError`，而不是静默覆盖。删除遵循同样的规则。
+如果你读取之后另一个标签页改了条目，`ifMatch` 不再匹配，你会得到 `ConflictError`，而不是静默覆盖。删除遵循同样的规则。更新令牌严格单调递增——即使同一毫秒内的两次更新也会产生不同的令牌，过期令牌必定被检测出来。
 
 ## 所有权守卫
 

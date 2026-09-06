@@ -63,6 +63,20 @@ describe('MemoryEngine', () => {
     expect(forced.content).toBe('v3')
   })
 
+  it('issues strictly monotonic update tokens even within the same millisecond', async () => {
+    const { engine } = makeEngine()
+    const entry = await engine.write({ title: 'T', content: 'v1' })
+
+    const second = await engine.update(entry.id, { content: 'v2' }, { ifMatch: entry.updatedAt })
+    const third = await engine.update(entry.id, { content: 'v3' }, { ifMatch: second.updatedAt })
+
+    expect(third.updatedAt > second.updatedAt).toBe(true)
+    // The original token must no longer match even if the clock did not advance.
+    await expect(engine.update(entry.id, { content: 'v4' }, { ifMatch: entry.updatedAt })).rejects.toBeInstanceOf(
+      ConflictError,
+    )
+  })
+
   it('enforces read-first deletes', async () => {
     const { engine } = makeEngine()
     const entry = await engine.write({ title: 'T', content: 'C' })
