@@ -1,6 +1,6 @@
-# memengine
+# engram
 
-[![CI](https://github.com/hdot123-org/memengine/actions/workflows/ci.yml/badge.svg)](https://github.com/hdot123-org/memengine/actions/workflows/ci.yml)
+[![CI](https://github.com/hdot123-org/engram/actions/workflows/ci.yml/badge.svg)](https://github.com/hdot123-org/engram/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Client-side layered memory engine for AI apps.** TypeScript, zero dependencies, isomorphic — runs in the browser, Node, and edge runtimes.
@@ -9,14 +9,14 @@
 
 ## Why
 
-AI apps keep forgetting. Chat history is not memory: it is linear, unstructured, and evaporates with the tab. memengine gives your app a small, disciplined, layered memory that lives entirely on the client — no server, no database, no vendor lock-in.
+AI apps keep forgetting. Chat history is not memory: it is linear, unstructured, and evaporates with the tab. engram gives your app a small, disciplined, layered memory that lives entirely on the client — no server, no database, no vendor lock-in.
 
 It ports the proven concepts of [memory-core](#relationship-to-memory-core) (a server-side agent memory system) to the client: layered routing, read-first mutations, an ownership guard, and schema migrations.
 
 ## Install
 
 ```bash
-npm install memengine
+npm install @hdot123-org/engram
 ```
 
 Requires Node >= 18 or any modern browser. Zero runtime dependencies.
@@ -24,7 +24,7 @@ Requires Node >= 18 or any modern browser. Zero runtime dependencies.
 ## Quick start
 
 ```ts
-import { KVStore, MemoryEngine } from 'memengine'
+import { KVStore, MemoryEngine } from '@hdot123-org/engram'
 
 const engine = new MemoryEngine({
   project: new KVStore(localStorage, 'project'), // this app's memory
@@ -86,7 +86,7 @@ A project entry with the same id shadows its global counterpart.
 
 ## Read-first mutations
 
-Blind overwrites are the classic memory-corruption bug. memengine borrows memory-core's read-first CRUD rule and turns it into optimistic concurrency:
+Blind overwrites are the classic memory-corruption bug. engram borrows memory-core's read-first CRUD rule and turns it into optimistic concurrency:
 
 ```ts
 const entry = (await engine.read(someId))!
@@ -108,7 +108,7 @@ If another tab changed the entry since your read, `ifMatch` no longer matches an
 Every mutation passes through a fail-closed guard before touching storage:
 
 ```ts
-import { MemoryEngine, MemoryStore, OwnershipGuard } from 'memengine'
+import { MemoryEngine, MemoryStore, OwnershipGuard } from '@hdot123-org/engram'
 
 const engine = new MemoryEngine({
   project: new MemoryStore(),
@@ -127,7 +127,7 @@ If the guard itself fails (bad input, throwing matcher), the operation is denied
 Entries carry a `schemaVersion`. On read, entries are upgraded automatically through a registered migration chain; entries written by a **newer** engine version are refused, never silently downgraded:
 
 ```ts
-import { MemoryEngine, MemoryStore, MigrationChain } from 'memengine'
+import { MemoryEngine, MemoryStore, MigrationChain } from '@hdot123-org/engram'
 
 const chain = new MigrationChain([
   {
@@ -146,7 +146,7 @@ engine.schemaVersion // 2 — new writes are stamped v2
 Layers sit on `MemoryStoreAdapter` — four async methods. Ship with `MemoryStore` (in-memory) and `KVStore` (localStorage-like). Bring your own:
 
 ```ts
-import type { MemoryStoreAdapter } from 'memengine'
+import type { MemoryStoreAdapter } from '@hdot123-org/engram'
 
 const redisAdapter: MemoryStoreAdapter = {
   name: 'redis',
@@ -189,7 +189,7 @@ Async adapters mean IndexedDB, SQLite (via WASM), OPFS, or a remote KV all work 
 
 ## Relationship to memory-core
 
-memengine is a client-side descendant of [memory-core](https://github.com/hdot123-org), a server-side, hook-driven agent memory system with a three-layer architecture (runtime state / global knowledge base / project knowledge base). memengine keeps its conceptual core — layered routing, ownership guarding, read-first CRUD, schema versioning — and rebuilds it as a dependency-free TypeScript library for client applications.
+engram is a client-side descendant of [memory-core](https://github.com/hdot123-org), a server-side, hook-driven agent memory system with a three-layer architecture (runtime state / global knowledge base / project knowledge base). engram keeps its conceptual core — layered routing, ownership guarding, read-first CRUD, schema versioning — and rebuilds it as a dependency-free TypeScript library for client applications.
 
 ## Development
 

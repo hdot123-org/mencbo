@@ -47,7 +47,7 @@ export class MigrationChain {
     const latest = this.latestVersion()
     if (entry.schemaVersion > latest) {
       throw new Error(
-        `entry schema v${entry.schemaVersion} is newer than engine v${latest}; upgrade memengine first`,
+        `entry schema v${entry.schemaVersion} is newer than engine v${latest}; upgrade engram first`,
       )
     }
     let current = entry

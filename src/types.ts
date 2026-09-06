@@ -1,5 +1,5 @@
 /**
- * Core types for memengine.
+ * Core types for engram.
  *
  * The model mirrors the layered memory architecture of memory-core:
  * - `global`  : cross-context knowledge (Layer 2 equivalent)

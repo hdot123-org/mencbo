@@ -51,7 +51,7 @@ describe('KVStore', () => {
 
   it('tolerates a corrupted index', async () => {
     const kv = new FakeKV()
-    kv.setItem('__memengine:broken:index__', '{not json')
+    kv.setItem('__engram:broken:index__', '{not json')
     const store = new KVStore(kv, 'broken')
     expect(await store.keys()).toEqual([])
     await store.set('mem:p:1', 'a')

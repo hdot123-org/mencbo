@@ -27,7 +27,7 @@ export class KVStore implements MemoryStoreAdapter {
   }
 
   private get indexKey(): string {
-    return `__memengine:${this.name}:index__`
+    return `__engram:${this.name}:index__`
   }
 
   private readIndex(): Set<string> {
