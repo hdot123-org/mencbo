@@ -1,6 +1,6 @@
-# memengine
+# MenCbo
 
-[![CI](https://github.com/hdot123-org/memengine/actions/workflows/ci.yml/badge.svg)](https://github.com/hdot123-org/memengine/actions/workflows/ci.yml)
+[![CI](https://github.com/hdot123-org/mencbo/actions/workflows/ci.yml/badge.svg)](https://github.com/hdot123-org/mencbo/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **面向 AI 应用的客户端分层记忆引擎。** TypeScript 编写，零依赖，同构 —— 浏览器、Node、Edge 运行时均可运行。
@@ -9,14 +9,14 @@
 
 ## 为什么需要它
 
-AI 应用总是在遗忘。聊天历史不是记忆：它是线性的、非结构化的，并且随标签页关闭而蒸发。memengine 给你的应用一个轻量、有纪律、分层的记忆系统，完全运行在客户端 —— 无服务器、无数据库、无厂商锁定。
+AI 应用总是在遗忘。聊天历史不是记忆：它是线性的、非结构化的，并且随标签页关闭而蒸发。MenCbo 给你的应用一个轻量、有纪律、分层的记忆系统，完全运行在客户端 —— 无服务器、无数据库、无厂商锁定。
 
 它把 [memory-core](#与-memory-core-的关系)（服务端 Agent 记忆系统）中经过验证的概念移植到客户端：分层路由、read-first 变更、所有权守卫、schema 迁移。
 
 ## 安装
 
 ```bash
-npm install memengine
+npm install mencbo
 ```
 
 要求 Node >= 18 或任意现代浏览器。零运行时依赖。
@@ -24,7 +24,7 @@ npm install memengine
 ## 快速上手
 
 ```ts
-import { KVStore, MemoryEngine } from 'memengine'
+import { KVStore, MemoryEngine } from 'mencbo'
 
 const engine = new MemoryEngine({
   project: new KVStore(localStorage, 'project'), // 本应用的记忆
@@ -86,7 +86,7 @@ updatedAt: 2026-09-06T02:59:00.000Z
 
 ## Read-first 变更
 
-盲写是记忆损坏的经典来源。memengine 把 memory-core 的 read-first CRUD 规则转化为乐观并发控制：
+盲写是记忆损坏的经典来源。MenCbo 把 memory-core 的 read-first CRUD 规则转化为乐观并发控制：
 
 ```ts
 const entry = (await engine.read(someId))!
@@ -108,7 +108,7 @@ await engine.update(someId, { content: '强制写入' }, { force: true })
 所有变更在触碰存储之前都要经过故障关闭（fail-closed）守卫：
 
 ```ts
-import { MemoryEngine, MemoryStore, OwnershipGuard } from 'memengine'
+import { MemoryEngine, MemoryStore, OwnershipGuard } from 'mencbo'
 
 const engine = new MemoryEngine({
   project: new MemoryStore(),
@@ -127,7 +127,7 @@ const engine = new MemoryEngine({
 条目携带 `schemaVersion`。读取时自动通过已注册的迁移链升级；**更新引擎版本**写入的条目会被拒绝，绝不静默降级：
 
 ```ts
-import { MemoryEngine, MemoryStore, MigrationChain } from 'memengine'
+import { MemoryEngine, MemoryStore, MigrationChain } from 'mencbo'
 
 const chain = new MigrationChain([
   {
@@ -146,7 +146,7 @@ engine.schemaVersion // 2 —— 新写入盖章 v2
 各层构建在 `MemoryStoreAdapter` 之上 —— 四个异步方法。内置 `MemoryStore`（内存）和 `KVStore`（localStorage 类）。可以自带：
 
 ```ts
-import type { MemoryStoreAdapter } from 'memengine'
+import type { MemoryStoreAdapter } from 'mencbo'
 
 const redisAdapter: MemoryStoreAdapter = {
   name: 'redis',
@@ -189,7 +189,7 @@ const redisAdapter: MemoryStoreAdapter = {
 
 ## 与 memory-core 的关系
 
-memengine 是 [memory-core](https://github.com/hdot123-org) 的客户端后裔。memory-core 是一个服务端、hook 驱动的 Agent 记忆系统，采用三层架构（运行时状态 / 全局知识库 / 项目知识库）。memengine 保留了它的概念内核 —— 分层路由、所有权守卫、read-first CRUD、schema 版本化 —— 并将其重构为零依赖的客户端 TypeScript 库。
+MenCbo 是 [memory-core](https://github.com/hdot123-org) 的客户端后裔。memory-core 是一个服务端、hook 驱动的 Agent 记忆系统，采用三层架构（运行时状态 / 全局知识库 / 项目知识库）。MenCbo 保留了它的概念内核 —— 分层路由、所有权守卫、read-first CRUD、schema 版本化 —— 并将其重构为零依赖的客户端 TypeScript 库。
 
 ## 开发
 

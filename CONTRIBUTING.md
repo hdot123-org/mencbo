@@ -1,12 +1,12 @@
-# Contributing to memengine
+# Contributing to MenCbo
 
-Thanks for your interest in improving memengine.
+Thanks for your interest in improving MenCbo.
 
 ## Getting started
 
 ```bash
-git clone https://github.com/hdot123-org/memengine.git
-cd memengine
+git clone https://github.com/hdot123-org/mencbo.git
+cd mencbo
 npm install
 npm test
 ```
@@ -31,7 +31,7 @@ Keep these intact when proposing changes:
 
 ## Reporting bugs
 
-Open an issue with: the memengine version, runtime (browser/Node/edge), a minimal reproduction, and what you expected instead.
+Open an issue with: the MenCbo version, runtime (browser/Node/edge), a minimal reproduction, and what you expected instead.
 
 ## License
 

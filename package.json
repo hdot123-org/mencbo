@@ -1,5 +1,5 @@
 {
-  "name": "memengine",
+  "name": "mencbo",
   "version": "0.1.0",
   "description": "Client-side layered memory engine for AI apps. Isomorphic TypeScript, zero dependencies.",
   "type": "module",
@@ -36,12 +36,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hdot123-org/memengine.git"
+    "url": "git+https://github.com/hdot123-org/mencbo.git"
   },
   "bugs": {
-    "url": "https://github.com/hdot123-org/memengine/issues"
+    "url": "https://github.com/hdot123-org/mencbo/issues"
   },
-  "homepage": "https://github.com/hdot123-org/memengine#readme",
+  "homepage": "https://github.com/hdot123-org/mencbo#readme",
   "devDependencies": {
     "typescript": "^5.6.0",
     "vitest": "^2.1.0"
