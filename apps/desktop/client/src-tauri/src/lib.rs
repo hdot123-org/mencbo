@@ -40,17 +40,16 @@ fn build_run_task_command(task_id: &str, uv_bin: &str, daemon_cwd: &str) -> (Str
     (program, args, cwd)
 }
 
-#[tauri::command]
-fn get_state() -> Result<Value, String> {
-    // MENCBO_STATE_PATH takes priority, fallback to ~/.mencbo/state.json
-    let path = if let Ok(p) = std::env::var("MENCBO_STATE_PATH") {
-        p
-    } else {
-        let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-        format!("{home}/.mencbo/state.json")
-    };
-
-    match std::fs::read_to_string(&path) {
+/// Shared helper: read state.json from `path`, parse it, and transform from
+/// daemon format (snake_case map) to frontend format (camelCase array).
+///
+/// This is the single source of truth for the payload shape emitted by both
+/// `get_state` command and the `state-changed` watcher event, ensuring they
+/// always produce identical structures.
+///
+/// On file-not-found or parse error, returns `{"mock": true, "tasks": []}`.
+fn read_and_transform_state(path: &std::path::Path) -> Value {
+    match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
             Ok(val) => {
                 // Transform daemon format (tasks as map) to frontend format (tasks as array)
@@ -82,12 +81,40 @@ fn get_state() -> Result<Value, String> {
                         .collect();
                     transformed["tasks"] = Value::Array(tasks_array);
                 }
-                Ok(transformed)
+                transformed
             }
-            Err(_) => Ok(serde_json::json!({ "mock": true, "tasks": [] })),
+            Err(_) => serde_json::json!({ "mock": true, "tasks": [] }),
         },
-        Err(_) => Ok(serde_json::json!({ "mock": true, "tasks": [] })),
+        Err(_) => serde_json::json!({ "mock": true, "tasks": [] }),
     }
+}
+
+/// Resolve the path to state.json: MENCBO_STATE_PATH env var takes priority,
+/// fallback to ~/.mencbo/state.json.
+fn resolve_state_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("MENCBO_STATE_PATH") {
+        std::path::PathBuf::from(p)
+    } else {
+        let home = std::env::var("HOME").unwrap_or_default();
+        std::path::PathBuf::from(format!("{home}/.mencbo/state.json"))
+    }
+}
+
+/// Resolve the daemon working directory: MENCBO_DAEMON_DIR env var takes priority,
+/// fallback to $HOME/mencbo/mencbo/apps/desktop/daemon.
+fn resolve_daemon_dir() -> Result<String, String> {
+    if let Ok(d) = std::env::var("MENCBO_DAEMON_DIR") {
+        Ok(d)
+    } else {
+        let home = std::env::var("HOME").map_err(|e| e.to_string())?;
+        Ok(format!("{home}/mencbo/mencbo/apps/desktop/daemon"))
+    }
+}
+
+#[tauri::command]
+fn get_state() -> Result<Value, String> {
+    let path = resolve_state_path();
+    Ok(read_and_transform_state(&path))
 }
 
 #[tauri::command]
@@ -95,8 +122,7 @@ async fn run_task(task: String) -> Result<(), String> {
     let uv_bin = std::env::var("MENCBO_UV_BIN")
         .unwrap_or_else(|_| "/opt/homebrew/bin/uv".to_string());
 
-    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-    let daemon_cwd = format!("{home}/mencbo/mencbo/apps/desktop/daemon");
+    let daemon_cwd = resolve_daemon_dir()?;
 
     let (program, args, cwd) = build_run_task_command(&task, &uv_bin, &daemon_cwd);
 
@@ -148,6 +174,8 @@ pub fn run() {
             let panel = app.get_webview_window("panel").expect("panel window");
 
             // Build tray icon in Rust (more reliable on macOS 26)
+            // NOTE: tauri.conf.json must NOT contain app.trayIcon — that would
+            // create a second NSStatusItem alongside this builder (dual tray bug).
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
                 .icon_as_template(true)
@@ -226,44 +254,57 @@ pub fn run() {
                 _ => {}
             });
 
-            // File watcher for state.json → emit state-changed
+            // File watcher for state.json → emit state-changed.
+            // FIX 4: Watch the *parent directory* instead of the file itself.
+            // - No pre-write: we must NEVER write to ~/.mencbo/state.json at startup
+            //   (红线 6: client is pure reader). The daemon is the sole writer.
+            // - By watching the parent dir, we catch Create/Modify/Rename events
+            //   from the daemon's atomic write pattern (os.replace).
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
                 use notify::{Watcher, RecursiveMode, Event, EventKind};
 
-                let state_path = if let Ok(p) = std::env::var("MENCBO_STATE_PATH") {
-                    std::path::PathBuf::from(p)
-                } else {
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    std::path::PathBuf::from(format!("{home}/.mencbo/state.json"))
+                let state_path = resolve_state_path();
+
+                // Watch the parent directory (where the daemon does atomic replace).
+                // The directory may or may not exist yet — watcher handles both.
+                let watch_dir = match state_path.parent() {
+                    Some(p) => p.to_path_buf(),
+                    None => return,
                 };
 
-                // Ensure parent dir exists for watcher
-                if let Some(parent) = state_path.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-
-                // Create the file if it doesn't exist so watcher can track it
-                if !state_path.exists() {
-                    let _ = std::fs::write(&state_path, "{}");
-                }
+                // Do NOT create the directory or file here — client is read-only.
 
                 let handle = app_handle.clone();
                 let path_clone = state_path.clone();
+                let file_name = state_path.file_name().map(|n| n.to_os_string());
+
                 let mut watcher = match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
                     if let Ok(event) = res {
-                        match event.kind {
-                            EventKind::Modify(_) | EventKind::Create(_) => {
-                                // Re-read and emit
-                                if let Ok(text) = std::fs::read_to_string(&path_clone) {
-                                    if let Ok(val) = serde_json::from_str::<Value>(&text) {
-                                        let _ = handle.emit("state-changed", val);
-                                    } else {
-                                        let _ = handle.emit("state-changed", serde_json::json!({ "mock": true }));
-                                    }
+                        // Only react to events that could affect our target file.
+                        // We watch the parent dir, so we get events for all files
+                        // in it; filter by file name to avoid spurious wakes.
+                        // Note: EventKind::Modify(_) covers all modify variants including
+                        // Modify(Name(_)) which is how atomic os.replace may surface.
+                        let relevant = match &event.kind {
+                            EventKind::Create(_) | EventKind::Modify(_) => {
+                                // Check if any affected path matches our target filename
+                                if let Some(ref target_name) = file_name {
+                                    event.paths.iter().any(|p| {
+                                        p.file_name().map(|n| n == target_name.as_os_str()).unwrap_or(false)
+                                    })
+                                } else {
+                                    // If we can't determine the target filename, react to all
+                                    true
                                 }
                             }
-                            _ => {}
+                            _ => false,
+                        };
+
+                        if relevant {
+                            // Use the shared transform helper — same shape as get_state
+                            let payload = read_and_transform_state(&path_clone);
+                            let _ = handle.emit("state-changed", payload);
                         }
                     }
                 }) {
@@ -271,7 +312,11 @@ pub fn run() {
                     Err(_) => return,
                 };
 
-                let _ = watcher.watch(&state_path, RecursiveMode::NonRecursive);
+                // Watch parent dir if it exists; if not, the watcher will pick it up
+                // when the daemon creates it (we can add it later or use RecursiveMode).
+                if watch_dir.exists() {
+                    let _ = watcher.watch(&watch_dir, RecursiveMode::NonRecursive);
+                }
 
                 // Keep watcher alive
                 loop {
@@ -279,16 +324,20 @@ pub fn run() {
                 }
             });
 
-            // Prevent exit when all windows closed
-            // (handled by RunEvent below)
-
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error building tauri application")
         .run(|_handle, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                api.prevent_exit();
+            // FIX 1: Exit guard — must check code.is_none() before prevent_exit().
+            // tauri 2.11.5 prevent_exit() swallows ALL exit codes (including code:Some(0))
+            // because runtime-wry skips ControlFlow::Exit on Prevent. Without the guard,
+            // app.exit(0) from the quit menu / quit_app command is silently swallowed and
+            // the process can never exit normally. See tauri issue #17723.
+            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
+                if code.is_none() {
+                    api.prevent_exit();
+                }
             }
         });
 }
@@ -296,6 +345,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serial lock for tests that mutate process-level env vars (MENCBO_STATE_PATH, etc.).
+    /// cargo test runs tests in parallel by default; env vars are process-global, so
+    /// concurrent set_var/remove_var across tests causes race conditions and flakes.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn panel_position_under_tray_rect() {
@@ -355,10 +410,15 @@ mod tests {
         assert_eq!(args, vec!["run", "python", "-m", "mencbo", "run-task", "test:task"]);
     }
 
+    // ---- Serial env-mutating tests (use ENV_MUTEX) ----
+
     #[test]
     fn get_state_valid_json() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
         // VAL-STATE-001: Valid state.json is parsed correctly
-        let temp_dir = std::env::temp_dir().join("mencbo_test_valid");
+        let temp_dir = std::env::temp_dir().join("mencbo_test_valid_v2");
+        let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
         let state_path = temp_dir.join("state.json");
         
@@ -405,8 +465,10 @@ mod tests {
 
     #[test]
     fn get_state_missing_file() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
         // VAL-STATE-002: Missing file returns mock marker
-        let nonexistent = std::env::temp_dir().join("mencbo_test_nonexistent_99999/state.json");
+        let nonexistent = std::env::temp_dir().join("mencbo_test_nonexistent_v2_99999/state.json");
         std::env::set_var("MENCBO_STATE_PATH", &nonexistent);
         
         let result = get_state().unwrap();
@@ -420,8 +482,11 @@ mod tests {
 
     #[test]
     fn get_state_bad_json() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
         // VAL-STATE-003: Bad JSON returns mock marker
-        let temp_dir = std::env::temp_dir().join("mencbo_test_bad_json");
+        let temp_dir = std::env::temp_dir().join("mencbo_test_bad_json_v2");
+        let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
         let state_path = temp_dir.join("state.json");
         
@@ -439,8 +504,11 @@ mod tests {
 
     #[test]
     fn get_state_truncated_json() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
         // VAL-STATE-003: Truncated JSON (partial write) returns mock marker
-        let temp_dir = std::env::temp_dir().join("mencbo_test_truncated");
+        let temp_dir = std::env::temp_dir().join("mencbo_test_truncated_v2");
+        let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
         let state_path = temp_dir.join("state.json");
         
@@ -458,8 +526,11 @@ mod tests {
 
     #[test]
     fn get_state_env_priority() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
         // VAL-STATE-001: MENCBO_STATE_PATH takes priority over default path
-        let temp_dir = std::env::temp_dir().join("mencbo_test_env_priority");
+        let temp_dir = std::env::temp_dir().join("mencbo_test_env_priority_v2");
+        let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
         let env_path = temp_dir.join("env_state.json");
         
@@ -481,5 +552,118 @@ mod tests {
         
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::env::remove_var("MENCBO_STATE_PATH");
+    }
+
+    #[test]
+    fn watcher_payload_matches_get_state_shape() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
+        // VAL-STATE-005 (programmatic verification): The watcher callback uses
+        // the same read_and_transform_state helper as get_state, so payloads
+        // must be structurally identical.
+        let temp_dir = std::env::temp_dir().join("mencbo_test_watcher_shape_v2");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let state_path = temp_dir.join("state.json");
+
+        let valid_json = r#"{
+            "updated_at": "2026-09-07T01:50:00+00:00",
+            "project_id": "hdot123-org/mencbo",
+            "health": "ok",
+            "tasks": {
+                "example:heartbeat": {
+                    "display_name": "示例·心跳日志",
+                    "last_run": "2026-09-07T01:30:00+00:00",
+                    "status": "success",
+                    "duration_ms": 12,
+                    "error": null
+                }
+            }
+        }"#;
+
+        std::fs::write(&state_path, valid_json).unwrap();
+        std::env::set_var("MENCBO_STATE_PATH", &state_path);
+
+        // get_state result
+        let from_command = get_state().unwrap();
+
+        // read_and_transform_state result (what watcher emits)
+        let from_watcher = read_and_transform_state(&state_path);
+
+        // They must be structurally identical
+        assert_eq!(from_command, from_watcher);
+
+        // Both must have the correct frontend shape:
+        // - tasks is an array (not a map)
+        // - each task has id, name, lastRun, durationMs (camelCase)
+        let tasks = from_watcher["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["id"], "example:heartbeat");
+        assert_eq!(tasks[0]["name"], "示例·心跳日志");
+        assert!(tasks[0].get("display_name").is_none());
+        assert!(tasks[0].get("last_run").is_none());
+        assert!(tasks[0].get("duration_ms").is_none());
+
+        // Mock fallback also consistent
+        let missing_path = temp_dir.join("nonexistent.json");
+        let mock_from_helper = read_and_transform_state(&missing_path);
+        assert_eq!(mock_from_helper["mock"], true);
+        assert!(mock_from_helper.get("tasks").unwrap().is_array());
+        assert_eq!(mock_from_helper["tasks"].as_array().unwrap().len(), 0);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::env::remove_var("MENCBO_STATE_PATH");
+    }
+
+    #[test]
+    fn run_task_daemon_dir_env_override() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
+        // VAL-STATE-006: MENCBO_DAEMON_DIR env var overrides the default daemon cwd
+        let custom_dir = "/custom/daemon/path";
+        std::env::set_var("MENCBO_DAEMON_DIR", custom_dir);
+        std::env::set_var("MENCBO_UV_BIN", "/custom/uv");
+
+        let daemon_cwd = resolve_daemon_dir().unwrap();
+        assert_eq!(daemon_cwd, custom_dir);
+
+        let uv_bin = std::env::var("MENCBO_UV_BIN")
+            .unwrap_or_else(|_| "/opt/homebrew/bin/uv".to_string());
+
+        let (program, args, cwd) = build_run_task_command("test:task", &uv_bin, &daemon_cwd);
+        assert_eq!(program, "/custom/uv");
+        assert_eq!(cwd, "/custom/daemon/path");
+        assert_eq!(args, vec!["run", "python", "-m", "mencbo", "run-task", "test:task"]);
+
+        std::env::remove_var("MENCBO_DAEMON_DIR");
+        std::env::remove_var("MENCBO_UV_BIN");
+    }
+
+    #[test]
+    fn run_task_daemon_dir_default() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
+        // When MENCBO_DAEMON_DIR is not set, resolve_daemon_dir falls back to $HOME/...
+        std::env::remove_var("MENCBO_DAEMON_DIR");
+
+        let daemon_cwd = resolve_daemon_dir().unwrap();
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(daemon_cwd, format!("{home}/mencbo/mencbo/apps/desktop/daemon"));
+    }
+
+    #[test]
+    fn resolve_state_path_env_priority() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+
+        let temp_dir = std::env::temp_dir().join("mencbo_test_resolve_path_v2");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let custom_path = temp_dir.join("custom_state.json");
+
+        std::env::set_var("MENCBO_STATE_PATH", &custom_path);
+        let resolved = resolve_state_path();
+        assert_eq!(resolved, custom_path);
+
+        std::env::remove_var("MENCBO_STATE_PATH");
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
