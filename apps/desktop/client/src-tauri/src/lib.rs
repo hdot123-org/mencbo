@@ -416,16 +416,21 @@ mod tests {
     fn get_state_valid_json() {
         let _lock = ENV_MUTEX.lock().unwrap();
 
-        // VAL-STATE-001: Valid state.json is parsed correctly
-        let temp_dir = std::env::temp_dir().join("mencbo_test_valid_v2");
+        // VAL-STATE-001: Valid state.json is parsed with full object semantic equality.
+        // The contract requires ALL fields preserved: updated_at, project_id, health,
+        // tasks (with each task's display_name→name, last_run→lastRun, duration_ms→durationMs,
+        // status, error — both null and non-null).
+        let temp_dir = std::env::temp_dir().join("mencbo_test_valid_v3");
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
         let state_path = temp_dir.join("state.json");
-        
+
+        // Fixture covers: 1 success task (error=null), 1 failed task (error=non-null),
+        // 1 running task (duration_ms=null, error=null) — exercising all field variants.
         let valid_json = r#"{
             "updated_at": "2026-09-07T01:50:00+00:00",
             "project_id": "hdot123-org/mencbo",
-            "health": "ok",
+            "health": "degraded",
             "tasks": {
                 "example:heartbeat": {
                     "display_name": "示例·心跳日志",
@@ -433,31 +438,80 @@ mod tests {
                     "status": "success",
                     "duration_ms": 12,
                     "error": null
+                },
+                "example:failure-demo": {
+                    "display_name": "示例·失败演示",
+                    "last_run": "2026-09-07T00:50:00+00:00",
+                    "status": "failed",
+                    "duration_ms": 1234,
+                    "error": "RuntimeError('演示失败')"
+                },
+                "example:maintenance": {
+                    "display_name": "示例·维护日志",
+                    "last_run": "2026-09-07T01:49:20+00:00",
+                    "status": "running",
+                    "duration_ms": null,
+                    "error": null
                 }
             }
         }"#;
-        
+
         std::fs::write(&state_path, valid_json).unwrap();
         std::env::set_var("MENCBO_STATE_PATH", &state_path);
-        
+
         let result = get_state().unwrap();
-        
-        // Should have tasks array (transformed from map)
-        assert!(result.get("tasks").unwrap().is_array());
-        let tasks = result["tasks"].as_array().unwrap();
-        assert_eq!(tasks.len(), 1);
-        
-        // Task should have id field and renamed fields
-        let task = &tasks[0];
-        assert_eq!(task["id"], "example:heartbeat");
-        assert_eq!(task["name"], "示例·心跳日志");
-        assert_eq!(task["lastRun"], "2026-09-07T01:30:00+00:00");
-        assert_eq!(task["durationMs"], 12);
-        assert_eq!(task["status"], "success");
-        
-        // Should preserve health field
-        assert_eq!(result["health"], "ok");
-        
+
+        // --- Top-level fields: full semantic equality ---
+        // updated_at must be preserved (contract VAL-STATE-001)
+        assert_eq!(result["updated_at"], "2026-09-07T01:50:00+00:00");
+        // project_id must be preserved
+        assert_eq!(result["project_id"], "hdot123-org/mencbo");
+        // health must be preserved
+        assert_eq!(result["health"], "degraded");
+
+        // --- Tasks array (transformed from map) ---
+        let tasks = result["tasks"].as_array().expect("tasks must be an array");
+        assert_eq!(tasks.len(), 3);
+
+        // Helper to find a task by id
+        let find_task = |id: &str| -> &Value {
+            tasks.iter().find(|t| t["id"] == id).expect("task not found")
+        };
+
+        // Success task: error is null, duration_ms=12→durationMs=12
+        let heartbeat = find_task("example:heartbeat");
+        assert_eq!(heartbeat["id"], "example:heartbeat");
+        assert_eq!(heartbeat["name"], "示例·心跳日志");
+        assert_eq!(heartbeat["lastRun"], "2026-09-07T01:30:00+00:00");
+        assert_eq!(heartbeat["status"], "success");
+        assert_eq!(heartbeat["durationMs"], 12);
+        assert!(heartbeat["error"].is_null(), "success task error must be null");
+
+        // Failed task: error is non-null string, duration_ms present
+        let failure = find_task("example:failure-demo");
+        assert_eq!(failure["id"], "example:failure-demo");
+        assert_eq!(failure["name"], "示例·失败演示");
+        assert_eq!(failure["lastRun"], "2026-09-07T00:50:00+00:00");
+        assert_eq!(failure["status"], "failed");
+        assert_eq!(failure["durationMs"], 1234);
+        assert!(failure["error"].is_string(), "failed task error must be non-null string");
+        assert_eq!(failure["error"], "RuntimeError('演示失败')");
+
+        // Running task: duration_ms=null→durationMs=null, error=null
+        let maintenance = find_task("example:maintenance");
+        assert_eq!(maintenance["id"], "example:maintenance");
+        assert_eq!(maintenance["name"], "示例·维护日志");
+        assert_eq!(maintenance["status"], "running");
+        assert!(maintenance["durationMs"].is_null(), "running task durationMs must be null");
+        assert!(maintenance["error"].is_null(), "running task error must be null");
+
+        // No snake_case keys should leak through (transformation check)
+        for task in tasks {
+            assert!(task.get("display_name").is_none(), "display_name should be renamed to name");
+            assert!(task.get("last_run").is_none(), "last_run should be renamed to lastRun");
+            assert!(task.get("duration_ms").is_none(), "duration_ms should be renamed to durationMs");
+        }
+
         // Cleanup
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::env::remove_var("MENCBO_STATE_PATH");
