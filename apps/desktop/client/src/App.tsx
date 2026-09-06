@@ -19,7 +19,9 @@ function App() {
     return <div className="h-screen w-screen bg-neutral-900" />;
   }
 
-  const health = state.health ?? (state.tasks.some((t) => t.status === "failed") ? "degraded" : "ok");
+  // Defensive default: ensure tasks is always an array even if state shape is malformed
+  const tasks = Array.isArray(state.tasks) ? state.tasks : [];
+  const health = state.health ?? (tasks.some((t) => t.status === "failed") ? "degraded" : "ok");
 
   return (
     <div className="flex flex-col h-screen w-screen bg-neutral-900 text-neutral-100">
@@ -33,7 +35,7 @@ function App() {
       )}
       <HeaderBar health={health as "ok" | "degraded"} />
       <div className="flex-1 overflow-y-auto">
-        <TaskList tasks={state.tasks} />
+        <TaskList tasks={tasks} />
       </div>
       <FooterBar />
     </div>

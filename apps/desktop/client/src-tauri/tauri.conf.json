@@ -28,12 +28,6 @@
         "focus": true
       }
     ],
-    "trayIcon": {
-      "id": "main",
-      "iconPath": "icons/tray.png",
-      "iconAsTemplate": true,
-      "tooltip": "MenCbo"
-    },
     "security": {
       "csp": null
     }
