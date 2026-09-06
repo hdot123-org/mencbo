@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Governance check
-        uses: hdot123-org/infra-core/actions/governance-check@v0.14.0
+        uses: hdot123-org/infra-core/actions/governance-check@v0.15.0
         with:
           owner-login: hdot123
           protected-patterns: '.evolution/**,scripts/**,.github/workflows/evolution-*.yml,.github/CODEOWNERS'
