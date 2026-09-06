@@ -52,10 +52,41 @@ fn get_state() -> Result<Value, String> {
 
     match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(val) => Ok(val),
-            Err(_) => Ok(serde_json::json!({ "mock": true })),
+            Ok(val) => {
+                // Transform daemon format (tasks as map) to frontend format (tasks as array)
+                let mut transformed = val.clone();
+                if let Some(tasks_map) = val.get("tasks").and_then(|t| t.as_object()) {
+                    let tasks_array: Vec<Value> = tasks_map
+                        .iter()
+                        .map(|(task_id, task_data)| {
+                            let mut task = task_data.clone();
+                            // Add id field from the map key
+                            task["id"] = Value::String(task_id.clone());
+                            // Rename display_name -> name
+                            if let Some(display_name) = task.get("display_name") {
+                                task["name"] = display_name.clone();
+                                task.as_object_mut().unwrap().remove("display_name");
+                            }
+                            // Rename last_run -> lastRun
+                            if let Some(last_run) = task.get("last_run") {
+                                task["lastRun"] = last_run.clone();
+                                task.as_object_mut().unwrap().remove("last_run");
+                            }
+                            // Rename duration_ms -> durationMs
+                            if let Some(duration_ms) = task.get("duration_ms") {
+                                task["durationMs"] = duration_ms.clone();
+                                task.as_object_mut().unwrap().remove("duration_ms");
+                            }
+                            task
+                        })
+                        .collect();
+                    transformed["tasks"] = Value::Array(tasks_array);
+                }
+                Ok(transformed)
+            }
+            Err(_) => Ok(serde_json::json!({ "mock": true, "tasks": [] })),
         },
-        Err(_) => Ok(serde_json::json!({ "mock": true })),
+        Err(_) => Ok(serde_json::json!({ "mock": true, "tasks": [] })),
     }
 }
 
@@ -322,5 +353,133 @@ mod tests {
         );
         assert_eq!(program, "/custom/bin/uv");
         assert_eq!(args, vec!["run", "python", "-m", "mencbo", "run-task", "test:task"]);
+    }
+
+    #[test]
+    fn get_state_valid_json() {
+        // VAL-STATE-001: Valid state.json is parsed correctly
+        let temp_dir = std::env::temp_dir().join("mencbo_test_valid");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let state_path = temp_dir.join("state.json");
+        
+        let valid_json = r#"{
+            "updated_at": "2026-09-07T01:50:00+00:00",
+            "project_id": "hdot123-org/mencbo",
+            "health": "ok",
+            "tasks": {
+                "example:heartbeat": {
+                    "display_name": "示例·心跳日志",
+                    "last_run": "2026-09-07T01:30:00+00:00",
+                    "status": "success",
+                    "duration_ms": 12,
+                    "error": null
+                }
+            }
+        }"#;
+        
+        std::fs::write(&state_path, valid_json).unwrap();
+        std::env::set_var("MENCBO_STATE_PATH", &state_path);
+        
+        let result = get_state().unwrap();
+        
+        // Should have tasks array (transformed from map)
+        assert!(result.get("tasks").unwrap().is_array());
+        let tasks = result["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1);
+        
+        // Task should have id field and renamed fields
+        let task = &tasks[0];
+        assert_eq!(task["id"], "example:heartbeat");
+        assert_eq!(task["name"], "示例·心跳日志");
+        assert_eq!(task["lastRun"], "2026-09-07T01:30:00+00:00");
+        assert_eq!(task["durationMs"], 12);
+        assert_eq!(task["status"], "success");
+        
+        // Should preserve health field
+        assert_eq!(result["health"], "ok");
+        
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::env::remove_var("MENCBO_STATE_PATH");
+    }
+
+    #[test]
+    fn get_state_missing_file() {
+        // VAL-STATE-002: Missing file returns mock marker
+        let nonexistent = std::env::temp_dir().join("mencbo_test_nonexistent_99999/state.json");
+        std::env::set_var("MENCBO_STATE_PATH", &nonexistent);
+        
+        let result = get_state().unwrap();
+        
+        assert_eq!(result["mock"], true);
+        assert!(result.get("tasks").unwrap().is_array());
+        assert_eq!(result["tasks"].as_array().unwrap().len(), 0);
+        
+        std::env::remove_var("MENCBO_STATE_PATH");
+    }
+
+    #[test]
+    fn get_state_bad_json() {
+        // VAL-STATE-003: Bad JSON returns mock marker
+        let temp_dir = std::env::temp_dir().join("mencbo_test_bad_json");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let state_path = temp_dir.join("state.json");
+        
+        std::fs::write(&state_path, "{ invalid json }}}").unwrap();
+        std::env::set_var("MENCBO_STATE_PATH", &state_path);
+        
+        let result = get_state().unwrap();
+        
+        assert_eq!(result["mock"], true);
+        assert!(result.get("tasks").unwrap().is_array());
+        
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::env::remove_var("MENCBO_STATE_PATH");
+    }
+
+    #[test]
+    fn get_state_truncated_json() {
+        // VAL-STATE-003: Truncated JSON (partial write) returns mock marker
+        let temp_dir = std::env::temp_dir().join("mencbo_test_truncated");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let state_path = temp_dir.join("state.json");
+        
+        // Simulate atomic write in progress
+        std::fs::write(&state_path, r#"{"updated_at": "2026-09-07"#).unwrap();
+        std::env::set_var("MENCBO_STATE_PATH", &state_path);
+        
+        let result = get_state().unwrap();
+        
+        assert_eq!(result["mock"], true);
+        
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::env::remove_var("MENCBO_STATE_PATH");
+    }
+
+    #[test]
+    fn get_state_env_priority() {
+        // VAL-STATE-001: MENCBO_STATE_PATH takes priority over default path
+        let temp_dir = std::env::temp_dir().join("mencbo_test_env_priority");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let env_path = temp_dir.join("env_state.json");
+        
+        let env_json = r#"{
+            "updated_at": "2026-09-07T02:00:00+00:00",
+            "project_id": "test/env-priority",
+            "health": "degraded",
+            "tasks": {}
+        }"#;
+        
+        std::fs::write(&env_path, env_json).unwrap();
+        std::env::set_var("MENCBO_STATE_PATH", &env_path);
+        
+        let result = get_state().unwrap();
+        
+        // Should read from env path, not default ~/.mencbo/state.json
+        assert_eq!(result["project_id"], "test/env-priority");
+        assert_eq!(result["health"], "degraded");
+        
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::env::remove_var("MENCBO_STATE_PATH");
     }
 }

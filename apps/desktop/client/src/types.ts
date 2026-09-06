@@ -9,5 +9,6 @@ export interface TaskState {
 
 export interface State {
   mock?: boolean;
+  health?: "ok" | "degraded";
   tasks: TaskState[];
 }

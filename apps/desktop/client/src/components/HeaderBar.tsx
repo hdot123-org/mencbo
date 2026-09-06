@@ -9,7 +9,7 @@ export function HeaderBar({ health }: HeaderBarProps) {
     <div className="flex items-center justify-between px-4 py-3 border-b border-neutral-800">
       <div className="flex items-center gap-2">
         <Activity size={16} className="text-neutral-400" />
-        <span className="text-sm font-medium text-neutral-200">
+        <span data-testid="header-scope" className="text-sm font-medium text-neutral-200">
           hdot123-org/mencbo
         </span>
       </div>

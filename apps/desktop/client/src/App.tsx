@@ -19,7 +19,7 @@ function App() {
     return <div className="h-screen w-screen bg-neutral-900" />;
   }
 
-  const health = state.tasks.some((t) => t.status === "failed") ? "degraded" : "ok";
+  const health = state.health ?? (state.tasks.some((t) => t.status === "failed") ? "degraded" : "ok");
 
   return (
     <div className="flex flex-col h-screen w-screen bg-neutral-900 text-neutral-100">
