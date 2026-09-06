@@ -1,4 +1,4 @@
-import { createEntry, newId, nowIso, parseEntry, serializeEntry } from './entry.js'
+import { createEntry, newId, nextTimestamp, parseEntry, serializeEntry } from './entry.js'
 import { ConflictError, EntryNotFoundError, GuardDeniedError, ValidationError } from './errors.js'
 import { OwnershipGuard } from './guard.js'
 import type { GuardDecision } from './guard.js'
@@ -145,7 +145,7 @@ export class MemoryEngine {
     const updated: MemoryEntry = {
       ...located.entry,
       ...definedFields(changes),
-      updatedAt: nowIso(),
+      updatedAt: nextTimestamp(located.entry.updatedAt),
     }
     const issues = validateEntry(updated, this.chain.latestVersion())
     if (issues.length > 0) throw new ValidationError(issues)
@@ -209,7 +209,7 @@ export class MemoryEngine {
     const pending = await this.readRaw(id, 'pending')
     if (!pending) throw new EntryNotFoundError(`pending:${id}`)
 
-    const promoted: MemoryEntry = { ...pending, layer: 'project', updatedAt: nowIso() }
+    const promoted: MemoryEntry = { ...pending, layer: 'project', updatedAt: nextTimestamp(pending.updatedAt) }
     const decision = this.guard.check('write', id, 'project')
     if (!decision.allowed) throw new GuardDeniedError(decision)
 

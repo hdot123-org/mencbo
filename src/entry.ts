@@ -25,6 +25,20 @@ export function nowIso(): string {
   return new Date().toISOString()
 }
 
+/**
+ * Strictly monotonic timestamp for optimistic-concurrency tokens.
+ * If the clock has not advanced past `previous` (same-millisecond writes),
+ * the new timestamp is bumped 1ms forward so stale tokens can never match.
+ */
+export function nextTimestamp(previous: string): string {
+  const previousMs = Date.parse(previous)
+  const now = new Date()
+  if (Number.isNaN(previousMs) || now.getTime() > previousMs) {
+    return now.toISOString()
+  }
+  return new Date(previousMs + 1).toISOString()
+}
+
 /** Build a fresh entry for the given layer, stamped with the engine's schema version. */
 export function createEntry(input: WriteInput, layer: Layer, schemaVersion: number = SCHEMA_VERSION): MemoryEntry {
   const now = nowIso()

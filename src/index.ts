@@ -11,7 +11,7 @@ export { LayerRouter } from './router.js'
 export { SCHEMA_VERSION, validateEntry } from './schema.js'
 export type { ValidationIssue } from './schema.js'
 
-export { EntryParseError, createEntry, newId, nowIso, parseEntry, serializeEntry } from './entry.js'
+export { EntryParseError, createEntry, newId, nextTimestamp, nowIso, parseEntry, serializeEntry } from './entry.js'
 
 export { MigrationChain } from './migrate.js'
 export type { Migration } from './migrate.js'
