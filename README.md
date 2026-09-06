@@ -1,29 +1,28 @@
-# mencbo（守护器）
+# MenCbo App
 
-MenCbo 桌面调度宿主的 Python 后台守护器。当前为 Phase 1：基础契约与 Git 作用域解析。
+MenCbo 桌面控制台与调度宿主 —— macOS 菜单栏常驻托盘控制台 + 后台单进程调度守护器。
 
-> Tauri 控制台客户端（Phase 3）与 DMG 交付（Phase 4）后续进入同一工作区。
+## 仓库定位
 
-## 架构位置
+本仓库是 MenCbo 系统的应用交付仓库（双仓库结构）：
 
-- **契约 1 · Git 作用域**：`mencbo.contracts.git_scope` —— 锁定 GitHub `owner/repo` 为唯一物理命名空间；分支/提交仅作元数据记录，不干预分支逻辑。
-- **契约 2 · 任务规范**：`mencbo.contracts.task_spec` —— `TaskSpec` dataclass；各子项目（memory、infra-core）通过自身 `tasks.py` 暴露符合规范的清单，由 Phase 2 的统一调度中心动态加载。
-- **契约 3 · 状态快照**：`~/.mencbo/state.json`，Phase 2 调度器落地后输出。
+| 仓库 | 职责 |
+| --- | --- |
+| [`hdot123-org/mencbo`](https://github.com/hdot123-org/mencbo) | TS 记忆引擎库（npm: `mencbo`），面向 AI 应用的通用客户端记忆 |
+| `hdot123-org/mencbo-app`（本仓库） | 桌面应用：Python 守护器 + Tauri 客户端 + DMG 交付 |
 
-## 开发
+## 结构
 
-```bash
-uv sync          # 创建 .venv 并安装项目与 dev 依赖
-uv run pytest    # 运行全部测试
-uv run python -c "from mencbo.contracts.git_scope import resolve_git_scope; print(resolve_git_scope('.'))"
+```
+daemon/    Phase 1-2 · Python 单进程统一调度守护器（uv 管理）
+client/    Phase 3 · Tauri v2 + TypeScript 控制台客户端（未启动）
 ```
 
-## Phase 1 模块
+## 路线图
 
-| 模块 | 职责 |
-| --- | --- |
-| `src/mencbo/contracts/task_spec.py` | 统一任务规范 `TaskSpec`（构造期校验） |
-| `src/mencbo/contracts/git_scope.py` | `resolve_git_scope()` 作用域解析 + remote URL 归一化 |
-| `src/mencbo/core/example_tasks.py` | 示例任务清单 `get_tasks()`，供 Phase 2 调度器联调 |
+- [x] **Phase 1** 基础契约：`TaskSpec`（契约 2）、Git 作用域解析（契约 1）、示例任务清单
+- [ ] **Phase 2** 单进程 asyncio 统一调度器、`~/.mencbo/state.json`（契约 3）、CLI status
+- [ ] **Phase 3** Tauri v2 菜单栏客户端外壳（非侵入式读取 state.json 渲染）
+- [ ] **Phase 4** Python 冻结为 sidecar 二进制，打包输出 `MenCbo.dmg`
 
-零运行时依赖，Python >= 3.12。
+守护器的开发命令（`uv sync` / `uv run pytest` 等）见 [daemon/README.md](daemon/README.md)。
