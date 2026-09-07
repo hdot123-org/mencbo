@@ -3,5 +3,5 @@ packages:
   - 'apps/*'
   - 'apps/desktop/*'
 allowBuilds:
+  core-js: true
   esbuild: true
-

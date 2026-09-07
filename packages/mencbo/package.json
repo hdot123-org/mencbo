@@ -1,6 +1,6 @@
 {
   "name": "mencbo",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Client-side layered memory engine for AI apps. Isomorphic TypeScript, zero dependencies.",
   "type": "module",
   "main": "./dist/index.js",
