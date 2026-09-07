@@ -81,6 +81,34 @@ jobs:
         working-directory: apps/desktop/client
         run: pnpm tauri build
 
+      - name: Re-sign app bundle
+        # tauri-bundler skips signing when no identity is configured; the
+        # Mach-O carries only the linker's adhoc signature, which does not
+        # cover the bundled Resources (icon.icns) — Gatekeeper then treats
+        # the downloaded app as damaged. Re-sign the whole bundle adhoc so
+        # the signature is self-consistent.
+        run: |
+          APP=apps/desktop/client/src-tauri/target/release/bundle/macos/MenCbo.app
+          codesign --force --sign - --deep "$APP"
+          codesign --verify --deep --strict "$APP"
+
+      - name: Rebuild DMG from re-signed app
+        # tauri's dmg bundles the pre-fix signature; repack it ourselves so
+        # the shipped DMG contains the re-signed bundle.
+        working-directory: apps/desktop/client/src-tauri/target/release/bundle
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          STAGE=$(mktemp -d)
+          cp -R macos/MenCbo.app "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          rm -f dmg/*.dmg
+          hdiutil create -volname MenCbo \
+            -srcfolder "$STAGE" \
+            -ov -format UDZO \
+            "dmg/MenCbo_${VERSION#v}_aarch64.dmg"
+          ls -lh dmg/
+
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
