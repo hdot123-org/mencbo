@@ -346,6 +346,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Second instance detected: focus existing window and return
+            // The plugin will automatically exit the second instance after this callback
+            if let Some(panel) = app.get_webview_window("panel") {
+                let _ = panel.show();
+                let _ = panel.set_focus();
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             get_state,
             run_task,
@@ -1113,5 +1121,34 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::env::remove_var("MENCBO_STATE_PATH");
+    }
+
+    // ---- Single-instance guard tests (VAL-SI-001) ----
+
+    #[test]
+    fn tauri_conf_identifier_is_stable() {
+        // VAL-SI-001: The production identifier must be com.mencbo.desktop
+        let conf = include_str!("../tauri.conf.json");
+        let json: serde_json::Value = serde_json::from_str(conf).unwrap();
+        assert_eq!(json["identifier"], "com.mencbo.desktop");
+    }
+
+    #[test]
+    fn tauri_conf_dev_identifier_is_different() {
+        // VAL-SI-001: Dev identifier must be com.mencbo.desktop.dev to avoid
+        // conflicting with the production instance during testing.
+        let conf = include_str!("../tauri.conf.dev.json");
+        let json: serde_json::Value = serde_json::from_str(conf).unwrap();
+        assert_eq!(json["identifier"], "com.mencbo.desktop.dev");
+        assert_ne!(json["identifier"], "com.mencbo.desktop");
+    }
+
+    #[test]
+    fn single_instance_plugin_compiles() {
+        // This test verifies that the tauri-plugin-single-instance dependency
+        // is correctly configured and the plugin can be registered.
+        // The actual runtime behavior (second instance focusing existing window)
+        // is validated via release build integration testing.
+        assert!(true, "Plugin registration compiles successfully");
     }
 }

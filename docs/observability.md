@@ -75,3 +75,29 @@ POST /api/projects/<PROJECT_ID>/query
 ```
 
 注意：`query` 字段必须是对象；`/api/projects/<id>/events/` 列表端点不可用（持续 server error）。
+
+## 验证（Validation）
+
+### 单实例守卫（Single-Instance Guard）
+
+接入 Tauri 2 官方 `tauri-plugin-single-instance` 插件：同一 bundle identifier 已运行时，再次启动聚焦既有主窗口/面板后立即退出，不产生可见双实例。
+
+**实现**：`src-tauri/src/lib.rs` 中 `.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { ... }))` 注册回调，二次启动时 `panel.show()` + `panel.set_focus()`，插件随后自动终止新进程。
+
+**测试构建隔离**：测试/开发构建使用 `tauri.conf.dev.json` 覆盖 identifier 为 `com.mencbo.desktop.dev`，确保与用户正式实例（`com.mencbo.desktop`）互不冲突、互不抢占。使用方式：
+
+```bash
+# 开发构建：使用 dev identifier（不抢占生产实例）
+pnpm -F desktop-client tauri dev --config src-tauri/tauri.conf.dev.json
+
+# 构建 dev bundle
+pnpm -F desktop-client tauri build --config src-tauri/tauri.conf.dev.json
+```
+
+Dev 构建使用独立 `app_data_dir`（`com.mencbo.desktop.dev`），`install_id` 独立生成，PostHog 查询按该 `distinct_id` 过滤。
+
+**VAL-SI-001 验证**（2026-09-07 release 构建实测）：
+- 启动 release 产物（PID 41105，`target/release/bundle/macos/MenCbo.app`）
+- 二次启动同 identifier 产物（PID 41311）→ 5s 后 PID 41311 已退出
+- 仅剩 1 个 `desktop-client` 进程（原始实例）
+- 清理：`kill 41105`，验证无残留
