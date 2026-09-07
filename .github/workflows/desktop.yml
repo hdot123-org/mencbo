@@ -1,0 +1,74 @@
+name: Desktop
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: desktop-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect:
+    name: Desktop / Detect
+    runs-on: ubuntu-latest
+    outputs:
+      desktop_changed: ${{ steps.filter.outputs.desktop_changed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            desktop_changed:
+              - 'apps/desktop/client/**'
+              - 'apps/desktop/analytics/**'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'package.json'
+              - '.github/workflows/desktop.yml'
+
+  client:
+    name: Desktop / Client
+    needs: detect
+    if: needs.detect.outputs.desktop_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm -F desktop-client exec tsc --noEmit
+      - run: pnpm -F desktop-client test
+
+  tauri:
+    name: Desktop / Tauri
+    needs: detect
+    if: needs.detect.outputs.desktop_changed == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # N1: tauri::generate_context! requires frontendDist (../dist) to exist
+      - run: pnpm -F desktop-client build
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/client/src-tauri -> target
+      - run: cargo check
+        working-directory: apps/desktop/client/src-tauri
+      - run: cargo test --lib
+        working-directory: apps/desktop/client/src-tauri
