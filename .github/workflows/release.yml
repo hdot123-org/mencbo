@@ -43,19 +43,77 @@ jobs:
       - name: Build
         run: pnpm run build
 
+  build-macos:
+    name: Build macOS DMG
+    needs: verify
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/client/src-tauri -> target
+
+      - name: Check tag matches tauri.conf.json version
+        working-directory: apps/desktop/client/src-tauri
+        run: |
+          CONF_VERSION="v$(node -p "require('./tauri.conf.json').version")"
+          if [ "${CONF_VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match tauri.conf.json version ${CONF_VERSION}"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build DMG
+        working-directory: apps/desktop/client
+        run: pnpm tauri build
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mencbo-macos-dmg
+          path: apps/desktop/client/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
   github-release:
     name: Create GitHub Release
-    needs: verify
+    needs: [verify, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create release with auto-generated notes
+      - uses: actions/download-artifact@v4
+        with:
+          name: mencbo-macos-dmg
+          path: dist-dmg
+
+      - name: Create or update release with auto-generated notes
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+        run: |
+          ls -lh dist-dmg/
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists, updating"
+            gh release edit "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --latest
+            gh release upload "${GITHUB_REF_NAME}" dist-dmg/*.dmg --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes dist-dmg/*.dmg
+          fi
 
   npm-publish:
     name: Publish to npm
@@ -72,6 +130,7 @@ jobs:
     steps:
       - name: Skip notice
         if: env.NPM_TOKEN == ''
+        working-directory: .
         run: echo "::notice::NPM_TOKEN secret not configured — npm publish skipped"
 
       - uses: actions/checkout@v4
