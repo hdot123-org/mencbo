@@ -48,8 +48,9 @@ events:
   rust_heartbeat:
     layer: rust
     status: active
-    props: {}
-    description: 5-minute heartbeat from Rust layer
+    props:
+      seq: number  # Monotonic counter within session, starts at 0
+    description: 5-minute heartbeat from Rust layer (seq increments each emission)
 
   js_launch:
     layer: webview
@@ -62,7 +63,8 @@ events:
     status: active
     props:
       uptime_sec: number
-    description: 5-minute heartbeat from webview layer
+      seq: number  # Monotonic counter within session, starts at 0
+    description: 5-minute heartbeat from webview layer (seq increments each emission)
 
   # === Panel Events ===
   panel_open:

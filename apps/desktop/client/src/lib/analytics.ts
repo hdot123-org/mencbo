@@ -11,6 +11,21 @@ let launchedAt = 0;
 let analyticsReady = false;
 let identityDegraded = false; // fix-sentinel-degraded-flag: true when install_id IO failed
 
+// Heartbeat sequence counter (标准 §6.1, VAL-REL-006)
+// Increments monotonically within session_id scope, resets on process restart (module reload).
+// Used to detect missing events: gap ≥10 minutes without filling = lost events.
+// Extracted to helper for testability (禁止为测试大改结构).
+export function createHeartbeatSeq() {
+  let counter = 0;
+  return {
+    next: () => counter++,
+    reset: () => { counter = 0; },
+    get: () => counter,
+  };
+}
+
+const heartbeatSeqHelper = createHeartbeatSeq();
+
 // Event buffer: events captured before identity is ready are queued here
 // and flushed in order once register() completes (fixes session_id race).
 const eventBuffer: Array<{ event: string; props?: Record<string, unknown> }> = [];
@@ -196,10 +211,12 @@ export async function initAnalytics() {
 
   // JS heartbeat (5 min). Compare with rust_heartbeat in PostHog: if rust
   // keeps flowing while js gaps, the hang is in the webview layer.
+  // VAL-REL-006: Heartbeat sequence counter (monotonic, resets on restart)
   window.setInterval(() => {
     if (analyticsReady) {
       capture("js_heartbeat", {
         uptime_sec: Math.round((Date.now() - launchedAt) / 1000),
+        seq: heartbeatSeqHelper.next(),
       });
     }
   }, 5 * 60 * 1000);
