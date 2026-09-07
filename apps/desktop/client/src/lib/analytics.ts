@@ -39,10 +39,14 @@ export async function initAnalytics() {
   let installId = "";
   let sessionId = "";
   let failReason = "";
+  let platform = navigator.platform || "unknown";
+  let arch = navigator.userAgent?.includes("arm64") || navigator.userAgent?.includes("aarch64")
+    ? "aarch64"
+    : "x86_64";
 
   // Step 1: try to fetch identity from Rust (with 3s timeout)
   try {
-    const identityPromise = invoke<{ installId: string; sessionId: string }>(
+    const identityPromise = invoke<{ installId: string; sessionId: string; platform: string; arch: string }>(
       "analytics_identity",
     );
     const timeoutPromise = new Promise<never>((_, reject) =>
@@ -52,6 +56,9 @@ export async function initAnalytics() {
     installId = identity.installId;
     sessionId = identity.sessionId;
     identityOk = true;
+    // Store platform/arch from Rust bridge (Fix 1: navigator.userAgent is unreliable on Apple Silicon)
+    platform = identity.platform;
+    arch = identity.arch;
   } catch (e) {
     failReason = `invoke_failed: ${String(e).slice(0, 200)}`;
   }
@@ -96,22 +103,19 @@ export async function initAnalytics() {
 
   // Step 4: register baseline properties and capture diagnostic + launch
   if (initOk) {
-    if (identityOk) {
-      // Get app version from Tauri API (VAL-ENV-003)
-      const appVersion = await getVersion().catch(() => "unknown");
-      
-      posthog.register({
-        session_id: sessionId,
-        source: "webview",
-        // Environment properties (VAL-ENV-002/003)
-        app_version: appVersion,
-        environment: "production", // JS only runs in release builds after DEV gate
-        platform: navigator.platform || "unknown",
-        arch: navigator.userAgent.includes("arm64") || navigator.userAgent.includes("aarch64") 
-          ? "aarch64" 
-          : "x86_64",
-      });
-    }
+    // Get app version from Tauri API (VAL-ENV-003)
+    const appVersion = await getVersion().catch(() => "unknown");
+    
+    // Register baseline properties for ALL paths (Fix 2: fallback path must have baselines)
+    posthog.register({
+      session_id: identityOk ? sessionId : "missing",
+      source: "webview",
+      // Environment properties (VAL-ENV-002/003)
+      app_version: appVersion,
+      environment: "production", // JS only runs in release builds after DEV gate
+      platform: platform,
+      arch: arch,
+    });
 
     analyticsReady = true;
     launchedAt = Date.now();
