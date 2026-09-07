@@ -7,6 +7,34 @@ use tauri::{
 use tauri_plugin_updater::UpdaterExt;
 use serde_json::Value;
 
+/// PostHog observability (project key is public by design — capture-only).
+const POSTHOG_KEY: &str = "phc_BKjuzVRSBJ26E49hUin3nKxxN2wX8BeD4pSgixUxpcfF";
+const POSTHOG_URL: &str = "https://us.i.posthog.com/capture/";
+
+/// Fire-and-forget analytics from the Rust side: own thread, short timeout,
+/// errors swallowed — must never block or kill the app (panic=abort profile).
+fn posthog_capture(event: &str, props: serde_json::Value) {
+    let event = event.to_string();
+    std::thread::spawn(move || {
+        let body = serde_json::json!({
+            "api_key": POSTHOG_KEY,
+            "event": event,
+            "distinct_id": format!(
+                "mencbo-{}",
+                std::env::var("USER").unwrap_or_else(|_| "unknown".into())
+            ),
+            "properties": props,
+        });
+        let Ok(client) = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        else {
+            return;
+        };
+        let _ = client.post(POSTHOG_URL).json(&body).send();
+    });
+}
+
 const PANEL_W: f64 = 360.0;
 const GAP: f64 = 6.0;
 
@@ -187,16 +215,88 @@ fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Shared updater logic for the 6h background loop and the manual trigger.
+/// Ok(Installed) means the new version is on disk; the caller must restart.
+enum UpdateOutcome {
+    UpToDate,
+    Installed,
+}
+
+async fn check_and_install(handle: &tauri::AppHandle) -> Result<UpdateOutcome, String> {
+    let updater = match handle.updater_builder().build() {
+        Ok(u) => u,
+        Err(e) => {
+            let m = format!("builder error: {e}");
+            posthog_capture(
+                "updater_error",
+                serde_json::json!({ "stage": "builder", "detail": m }),
+            );
+            return Err(m);
+        }
+    };
+    let update = match updater.check().await {
+        Ok(Some(u)) => u,
+        Ok(None) => return Ok(UpdateOutcome::UpToDate),
+        Err(e) => {
+            let m = format!("check failed: {e}");
+            posthog_capture(
+                "updater_error",
+                serde_json::json!({ "stage": "check", "detail": m }),
+            );
+            return Err(m);
+        }
+    };
+    println!(
+        "[updater] {} -> {}",
+        update.current_version, update.version
+    );
+    let target = update.version.clone();
+    if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
+        let m = format!("install failed: {e}");
+        posthog_capture(
+            "updater_error",
+            serde_json::json!({ "stage": "install", "detail": m }),
+        );
+        return Err(m);
+    }
+    posthog_capture("updater_installed", serde_json::json!({ "to": target }));
+    Ok(UpdateOutcome::Installed)
+}
+
+#[tauri::command]
+async fn check_update(app: tauri::AppHandle) -> Result<String, String> {
+    match check_and_install(&app).await? {
+        UpdateOutcome::UpToDate => Ok("latest".to_string()),
+        // If an update installed, restart() never returns — the frontend's
+        // invoke dies with the old process, which is expected.
+        UpdateOutcome::Installed => app.restart(),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_state, run_task, open_logs_dir, quit_app])
+        .invoke_handler(tauri::generate_handler![get_state, run_task, open_logs_dir, quit_app, check_update])
         .setup(|app| {
             // Hide Dock icon (macOS only)
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Rust-side observability, independent of the webview: launch
+            // marker + 5-min heartbeat. If rust_heartbeat keeps flowing while
+            // js_heartbeat gaps, a hang is localized to the webview layer.
+            posthog_capture(
+                "rust_launch",
+                serde_json::json!({ "version": app.package_info().version.to_string() }),
+            );
+            std::thread::spawn(|| {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(5 * 60));
+                    posthog_capture("rust_heartbeat", serde_json::json!({}));
+                }
+            });
 
             // Auto-update: check at startup, then every 6h. Silent download +
             // install + relaunch. Defensive error handling only — release
@@ -207,41 +307,22 @@ pub fn run() {
                     tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
                 loop {
                     ticker.tick().await; // first tick fires immediately
-                    let updater = match update_handle.updater_builder().build() {
-                        Ok(u) => u,
-                        Err(e) => {
-                            eprintln!("[updater] builder error: {e}");
-                            continue;
-                        }
-                    };
-                    let update = match updater.check().await {
-                        Ok(Some(u)) => u,
-                        Ok(None) => continue, // up to date
-                        Err(e) => {
-                            eprintln!("[updater] check failed: {e}");
-                            continue;
-                        }
-                    };
-                    println!(
-                        "[updater] {} -> {}",
-                        update.current_version, update.version
-                    );
-                    if let Err(e) =
-                        update.download_and_install(|_, _| {}, || {}).await
-                    {
-                        eprintln!("[updater] install failed: {e}");
-                        continue;
+                    match check_and_install(&update_handle).await {
+                        Ok(UpdateOutcome::Installed) => update_handle.restart(),
+                        Ok(UpdateOutcome::UpToDate) => {}
+                        Err(e) => eprintln!("[updater] {e}"),
                     }
-                    update_handle.restart(); // never returns
                 }
             });
 
-            // Tray menu: disabled version item on top + quit
+            // Tray menu: version (disabled) + manual check + quit
             let version = app.package_info().version.to_string();
             let version_item =
                 MenuItem::with_id(app, "version", format!("MenCbo v{version}"), false, None::<&str>)?;
+            let check_item =
+                MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&version_item, &quit])?;
+            let menu = Menu::with_items(app, &[&version_item, &check_item, &quit])?;
 
             let panel = app.get_webview_window("panel").expect("panel window");
 
@@ -258,6 +339,18 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => app.exit(0),
+                    "check-update" => {
+                        let h = app.clone();
+                        tauri::async_runtime::spawn(async move {
+                            match check_and_install(&h).await {
+                                Ok(UpdateOutcome::Installed) => h.restart(),
+                                Ok(UpdateOutcome::UpToDate) => {
+                                    println!("[updater] up to date (manual)")
+                                }
+                                Err(e) => eprintln!("[updater] manual check failed: {e}"),
+                            }
+                        });
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(move |tray, event| {
@@ -276,6 +369,7 @@ pub fn run() {
                         // Toggle: if visible, hide
                         if panel.is_visible().unwrap_or(false) {
                             let _ = panel.hide();
+                            let _ = app.emit("panel-event", "hide");
                             return;
                         }
 
@@ -312,6 +406,7 @@ pub fn run() {
                         let _ = panel.set_position(Position::Physical(PhysicalPosition::new(x, y)));
                         let _ = panel.show();
                         let _ = panel.set_focus();
+                        let _ = app.emit("panel-event", "show");
                     }
                 })
                 .build(app)?;
