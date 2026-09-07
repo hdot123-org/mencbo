@@ -1,3 +1,4 @@
+mod analytics;
 mod identity;
 
 use serde_json::Value;
@@ -12,7 +13,7 @@ use identity::{get_or_create_install_id, generate_launch_id};
 /// PostHog observability. Key is injected at build time via build.rs from POSTHOG_KEY env var.
 /// If POSTHOG_KEY is not set, falls back to "NO_KEY" sentinel and all captures become no-op.
 const POSTHOG_KEY: &str = env!("POSTHOG_KEY", "PostHog key must be provided via POSTHOG_KEY env var or defaults to NO_KEY");
-const POSTHOG_URL: &str = "https://us.i.posthog.com/capture/";
+const POSTHOG_HOST: &str = "https://us.i.posthog.com";
 
 /// Global identity state (install_id + session_id) for this app instance.
 /// Stored in a OnceLock to ensure thread-safe initialization.
@@ -23,9 +24,9 @@ static IDENTITY: OnceLock<(String, String)> = OnceLock::new();
 /// This avoids passing app context through every posthog_capture call.
 static APP_VERSION: OnceLock<String> = OnceLock::new();
 
-/// Fire-and-forget analytics from the Rust side: own thread, short timeout,
-/// errors swallowed — must never block or kill the app (panic=abort profile).
-/// Uses install_id as distinct_id and includes session_id in all events.
+/// Fire-and-forget analytics from the Rust side: enqueue to batch queue.
+/// The batch queue handles batching (20 items or 60s), retry with exponential backoff,
+/// and dropped event tracking (VAL-REL-001, VAL-REL-005).
 ///
 /// Environment gating: debug builds (cfg!(debug_assertions)) are complete no-op.
 /// This is the second layer of defense after POSTHOG_KEY gating (VAL-ENV-005).
@@ -46,7 +47,6 @@ fn posthog_capture(event: &str, mut props: serde_json::Value) {
         return;
     }
 
-    let event = event.to_string();
     let (install_id, session_id) = IDENTITY
         .get()
         .cloned()
@@ -77,21 +77,8 @@ fn posthog_capture(event: &str, mut props: serde_json::Value) {
         }
     }
 
-    std::thread::spawn(move || {
-        let body = serde_json::json!({
-            "api_key": POSTHOG_KEY,
-            "event": event,
-            "distinct_id": install_id,
-            "properties": props,
-        });
-        let Ok(client) = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-        else {
-            return;
-        };
-        let _ = client.post(POSTHOG_URL).json(&body).send();
-    });
+    // Enqueue to batch queue instead of spawning a new thread
+    analytics::enqueue(event, &install_id, props);
 }
 
 const PANEL_W: f64 = 360.0;
@@ -437,6 +424,11 @@ pub fn run() {
                 let _ = IDENTITY.set(("analytics-disabled".to_string(), "analytics-disabled".to_string()));
             }
 
+            // Initialize batch analytics queue (VAL-REL-001, VAL-REL-005).
+            // Uses a blocking thread for periodic flush (20 items or 60s).
+            // Global singleton reqwest::blocking::Client is created here and reused.
+            analytics::init(POSTHOG_KEY, POSTHOG_HOST);
+
             // Rust-side observability, independent of the webview: launch
             // marker + 5-min heartbeat. If rust_heartbeat keeps flowing while
             // js_heartbeat gaps, a hang is localized to the webview layer.
@@ -677,15 +669,23 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error building tauri application")
         .run(|_handle, event| {
-            // FIX 1: Exit guard — must check code.is_none() before prevent_exit().
-            // tauri 2.11.5 prevent_exit() swallows ALL exit codes (including code:Some(0))
-            // because runtime-wry skips ControlFlow::Exit on Prevent. Without the guard,
-            // app.exit(0) from the quit menu / quit_app command is silently swallowed and
-            // the process can never exit normally. See tauri issue #17723.
-            if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
-                if code.is_none() {
-                    api.prevent_exit();
+            match event {
+                // FIX 1: Exit guard — must check code.is_none() before prevent_exit().
+                // tauri 2.11.5 prevent_exit() swallows ALL exit codes (including code:Some(0))
+                // because runtime-wry skips ControlFlow::Exit on Prevent. Without the guard,
+                // app.exit(0) from the quit menu / quit_app command is silently swallowed and
+                // the process can never exit normally. See tauri issue #17723.
+                tauri::RunEvent::ExitRequested { code, api, .. } => {
+                    if code.is_none() {
+                        api.prevent_exit();
+                    }
                 }
+                // Flush batch queue synchronously on exit (VAL-REL-001).
+                // This ensures pending analytics events are sent before the process terminates.
+                tauri::RunEvent::Exit => {
+                    analytics::flush_sync(std::time::Duration::from_secs(3));
+                }
+                _ => {}
             }
         });
 }
