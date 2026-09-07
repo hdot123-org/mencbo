@@ -8,12 +8,16 @@ isolation_threshold: 3
 failure_label: evolution-isolated
 # 引擎工具由 infra-core memory rule pack 提供（infra-* 入口随 scanner venv
 # 安装）。mencbo 仓内无 memory/ kb 结构：按名覆盖禁用 kb 结构类审计，
-# 保留通用审计（code_hygiene_audit / error_patterns / evolution_self_audit）。
+# 保留通用审计（code_hygiene_audit / evolution_self_audit）。
+# error_patterns：CI 上无宿主输入源，零输入空转且向 runner 工作区写
+# registry.jsonl 产物——按 infra-core 自扫配置先例禁用。
 rule_packs:
   - pack: memory
 audit_tools:
   - name: daily_kb_audit
     enabled: false
   - name: audit_layout
+    enabled: false
+  - name: error_patterns
     enabled: false
 snapshot_limit: 100

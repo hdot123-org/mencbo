@@ -1,1 +1,10 @@
-{"suppressed": []}
+{
+  "suppressed": [
+    {
+      "rule_id": "EVOLUTION_CONFIG_INSUFFICIENT",
+      "location": "*",
+      "reason": "mencbo 设计上仅启用 3 个审计工具，引擎 MIN_AUDIT_TOOLS=5 按全量计数误报（count=3/min=5）；根治项（部分禁用语义）已登记 infra-core 技术债，落地后移除本条",
+      "expires": "2026-09-21"
+    }
+  ]
+}

@@ -31,3 +31,12 @@ build/
 .pytest_cache/
 .ruff_cache/
 
+# Memory artifacts (memory-hook 产物，禁止提交)
+/memory/
+project-map/
+INDEX.md
+NOW.md
+tools/
+tests/.memory-anchor.md
+AGENTS.md
+
