@@ -7,11 +7,13 @@
 //! - Global singleton reqwest::blocking::Client
 //! - Synchronous flush on exit (≤3s timeout)
 //! - Dropped count carried in next event as `queue_dropped` property
+//! - Per-event client-side RFC3339 UTC timestamp (VAL-REL-002)
+//! - Batch-level `sent_at` for PostHog clock-skew correction (VAL-REL-002)
 
 use serde_json::Value;
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -44,6 +46,8 @@ pub(crate) struct QueueEntry {
     pub event: String,
     pub distinct_id: String,
     pub properties: Value,
+    /// RFC3339 UTC timestamp captured at enqueue time (VAL-REL-002).
+    pub timestamp: String,
 }
 
 /// Shared mutable state protected by the mutex.
@@ -70,6 +74,60 @@ static BATCH_QUEUE: OnceLock<Arc<Inner>> = OnceLock::new();
 static HTTP_CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
 static BATCH_URL: OnceLock<String> = OnceLock::new();
 static API_KEY: OnceLock<String> = OnceLock::new();
+
+// ── Timestamp helpers (RFC3339 UTC, no chrono) ─────────────────────────
+
+/// Generate an RFC3339 UTC timestamp for the current moment.
+/// Uses only `std::time` — no chrono dependency.
+/// Format: `2026-09-08T12:34:56.789Z`
+pub(crate) fn now_rfc3339() -> String {
+    system_time_to_rfc3339(SystemTime::now())
+}
+
+/// Convert a `SystemTime` to RFC3339 UTC string.
+/// Manual formatting to avoid pulling in chrono.
+pub(crate) fn system_time_to_rfc3339(time: SystemTime) -> String {
+    let duration = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO);
+    let secs = duration.as_secs();
+    let millis = duration.subsec_millis();
+
+    // Break down into date/time components
+    let (year, month, day, hour, min, sec) = unix_secs_to_datetime(secs);
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        year, month, day, hour, min, sec, millis
+    )
+}
+
+/// Convert Unix timestamp (seconds since 1970-01-01 00:00:00 UTC) to
+/// (year, month, day, hour, minute, second) tuple.
+/// Pure arithmetic, no lookup tables, no allocations.
+fn unix_secs_to_datetime(secs: u64) -> (u64, u64, u64, u64, u64, u64) {
+    let sec = secs % 60;
+    let mins_total = secs / 60;
+    let min = mins_total % 60;
+    let hours_total = mins_total / 60;
+    let hour = hours_total % 24;
+    let days = hours_total / 24;
+
+    // Days since 1970-01-01
+    // Algorithm from http://howardhinnant.github.io/date_algorithms.html
+    let z = days + 719468;
+    let era = z / 146097;
+    let doe = z - era * 146097; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year [0, 365]
+    let mp = (5 * doy + 2) / 153; // month index [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
+    let y = if m <= 2 { y + 1 } else { y };
+
+    (y, m, d, hour, min, sec)
+}
 
 // ── Public API ─────────────────────────────────────────────────────────
 
@@ -206,10 +264,21 @@ fn enqueue_inner(inner: &Inner, event: &str, distinct_id: &str, properties: &mut
         }
     }
 
+    // Capture timestamp at enqueue moment (VAL-REL-002).
+    // This timestamp is immutable — it survives serialization, batching,
+    // and persistence without changing.
+    let ts = now_rfc3339();
+
+    // Also inject timestamp into properties so it's queryable in PostHog
+    if let Some(obj) = properties.as_object_mut() {
+        obj.insert("timestamp".to_string(), Value::String(ts.clone()));
+    }
+
     let entry = QueueEntry {
         event: event.to_string(),
         distinct_id: distinct_id.to_string(),
         properties: properties.clone(),
+        timestamp: ts,
     };
 
     let mut state = inner.state.lock().unwrap();
@@ -225,6 +294,11 @@ fn enqueue_inner(inner: &Inner, event: &str, distinct_id: &str, properties: &mut
 }
 
 /// Build the JSON body for a /batch/ request.
+///
+/// Each event entry carries its own `timestamp` (RFC3339 UTC, captured at
+/// enqueue time) inside `properties` so PostHog can distinguish events within
+/// the same batch (VAL-REL-002). The top-level `sent_at` records the moment
+/// the HTTP request is assembled, enabling clock-skew correction.
 fn build_batch_body(api_key: &str, entries: &[QueueEntry]) -> Value {
     let batch: Vec<Value> = entries
         .iter()
@@ -233,6 +307,7 @@ fn build_batch_body(api_key: &str, entries: &[QueueEntry]) -> Value {
                 "event": e.event,
                 "distinct_id": e.distinct_id,
                 "properties": e.properties,
+                "timestamp": e.timestamp,
             })
         })
         .collect();
@@ -240,6 +315,7 @@ fn build_batch_body(api_key: &str, entries: &[QueueEntry]) -> Value {
     serde_json::json!({
         "api_key": api_key,
         "batch": batch,
+        "sent_at": now_rfc3339(),
     })
 }
 
@@ -366,6 +442,7 @@ mod tests {
             event: event.to_string(),
             distinct_id: "test-user".to_string(),
             properties: serde_json::json!({}),
+            timestamp: now_rfc3339(),
         }
     }
 
@@ -514,11 +591,13 @@ mod tests {
                 event: "rust_launch".to_string(),
                 distinct_id: "desktop-abc".to_string(),
                 properties: serde_json::json!({"session_id": "s1", "source": "rust_native"}),
+                timestamp: "2026-09-08T12:00:00.000Z".to_string(),
             },
             QueueEntry {
                 event: "rust_heartbeat".to_string(),
                 distinct_id: "desktop-abc".to_string(),
                 properties: serde_json::json!({"session_id": "s1", "seq": 1}),
+                timestamp: "2026-09-08T12:00:05.000Z".to_string(),
             },
         ];
 
@@ -560,6 +639,7 @@ mod tests {
                 "arch": "aarch64",
                 "queue_dropped": 42,
             }),
+            timestamp: "2026-09-08T12:00:00.000Z".to_string(),
         }];
 
         let body = build_batch_body("k", &entries);
@@ -635,5 +715,105 @@ mod tests {
         let host = "https://us.i.posthog.com/";
         let url = format!("{}/batch/", host.trim_end_matches('/'));
         assert_eq!(url, "https://us.i.posthog.com/batch/");
+    }
+
+    // ── Timestamp tests (VAL-REL-002) ──
+
+    #[test]
+    fn rfc3339_format_valid() {
+        let ts = now_rfc3339();
+        // Should match pattern: YYYY-MM-DDTHH:MM:SS.mmmZ
+        assert!(ts.ends_with('Z'), "timestamp must end with Z: {}", ts);
+        assert_eq!(ts.len(), 24, "timestamp length should be 24 chars: {}", ts);
+        assert!(ts.contains('T'), "timestamp must contain T separator");
+    }
+
+    #[test]
+    fn rfc3339_unix_epoch() {
+        // Test known timestamp: 1970-01-01 00:00:00 UTC
+        let epoch = UNIX_EPOCH;
+        let ts = system_time_to_rfc3339(epoch);
+        assert_eq!(ts, "1970-01-01T00:00:00.000Z");
+    }
+
+    #[test]
+    fn rfc3339_known_date() {
+        // Test 2024-01-15 09:30:45.123 UTC
+        // Unix timestamp for 2024-01-15 09:30:45 UTC = 1705311045
+        let secs = 1705311045;
+        let millis = 123;
+        let duration = Duration::new(secs, millis * 1_000_000);
+        let time = UNIX_EPOCH + duration;
+        let ts = system_time_to_rfc3339(time);
+        assert_eq!(ts, "2024-01-15T09:30:45.123Z");
+    }
+
+    #[test]
+    fn batch_body_includes_sent_at() {
+        let entries = vec![QueueEntry {
+            event: "test".to_string(),
+            distinct_id: "user".to_string(),
+            properties: serde_json::json!({}),
+            timestamp: "2026-09-08T12:00:00.000Z".to_string(),
+        }];
+        let body = build_batch_body("key", &entries);
+        
+        // sent_at must be present at top level
+        assert!(body.get("sent_at").is_some(), "batch body must include sent_at");
+        let sent_at = body["sent_at"].as_str().unwrap();
+        assert!(sent_at.ends_with('Z'), "sent_at must be RFC3339 UTC");
+    }
+
+    #[test]
+    fn batch_body_includes_event_timestamp() {
+        let entries = vec![QueueEntry {
+            event: "rust_launch".to_string(),
+            distinct_id: "desktop-abc".to_string(),
+            properties: serde_json::json!({}),
+            timestamp: "2026-09-08T12:00:00.000Z".to_string(),
+        }];
+        let body = build_batch_body("key", &entries);
+        
+        // Each event must have its timestamp
+        let batch = body["batch"].as_array().unwrap();
+        assert_eq!(batch[0]["timestamp"], "2026-09-08T12:00:00.000Z");
+    }
+
+    #[test]
+    fn enqueue_captures_timestamp() {
+        let inner = make_inner();
+        let mut props = serde_json::json!({});
+        let before = now_rfc3339();
+        std::thread::sleep(Duration::from_millis(10));
+        enqueue_inner(&inner, "test_event", "user", &mut props);
+        std::thread::sleep(Duration::from_millis(10));
+        let after = now_rfc3339();
+
+        let state = inner.state.lock().unwrap();
+        assert_eq!(state.entries.len(), 1);
+        let ts = &state.entries[0].timestamp;
+        
+        // Timestamp should be between before and after
+        assert!(ts >= &before && ts <= &after, "timestamp should be captured at enqueue time");
+    }
+
+    #[test]
+    fn timestamps_preserve_order() {
+        let inner = make_inner();
+        
+        let mut props1 = serde_json::json!({});
+        enqueue_inner(&inner, "event1", "user", &mut props1);
+        std::thread::sleep(Duration::from_millis(50));
+        
+        let mut props2 = serde_json::json!({});
+        enqueue_inner(&inner, "event2", "user", &mut props2);
+        
+        let state = inner.state.lock().unwrap();
+        assert_eq!(state.entries.len(), 2);
+        
+        // Second event's timestamp should be >= first event's timestamp
+        let ts1 = &state.entries[0].timestamp;
+        let ts2 = &state.entries[1].timestamp;
+        assert!(ts2 >= ts1, "timestamps should preserve chronological order");
     }
 }
