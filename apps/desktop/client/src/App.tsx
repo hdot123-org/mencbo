@@ -10,10 +10,22 @@ function App() {
   const [state, setState] = useState<State | null>(null);
 
   useEffect(() => {
+    const t0 = performance.now();
     loadState()
-      .then(setState)
+      .then((s) => {
+        setState(s);
+        capture("js_state_loaded", {
+          tasks: Array.isArray(s.tasks) ? s.tasks.length : 0,
+          duration_ms: Math.round(performance.now() - t0),
+        });
+      })
       .catch((e) => capture("state_load_failed", { reason: String(e).slice(0, 200) }));
-    const unsubscribe = subscribeState(setState);
+    const unsubscribe = subscribeState((s) => {
+      setState(s);
+      capture("js_state_updated", {
+        tasks: Array.isArray(s.tasks) ? s.tasks.length : 0,
+      });
+    });
     return unsubscribe;
   }, []);
 

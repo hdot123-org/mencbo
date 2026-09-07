@@ -11,7 +11,10 @@ export function initAnalytics() {
   try {
     posthog.init(POSTHOG_KEY, {
       api_host: POSTHOG_HOST,
-      autocapture: false,
+      // Autocapture: every webview click arrives as $autocapture with element
+      // metadata. Freeze signal: $autocapture gaps while tray_click (native)
+      // keeps flowing → webview layer is hung.
+      autocapture: true,
       capture_pageview: false,
       persistence: "memory",
     });

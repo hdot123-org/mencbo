@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "desktop-client"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "notify",
  "reqwest",
