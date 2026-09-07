@@ -3,7 +3,6 @@ import { HeaderBar } from "./components/HeaderBar";
 import { TaskList } from "./components/TaskList";
 import { FooterBar } from "./components/FooterBar";
 import { loadState, subscribeState } from "./lib/state";
-import { inTauri } from "./lib/env";
 import type { State } from "./types";
 
 function App() {
