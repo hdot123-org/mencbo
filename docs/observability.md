@@ -57,6 +57,7 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 | `source` | string | `"rust_native"` / `"webview"` | Event origin layer |
 | `platform` | string | `"macos"` / `"windows"` / `"linux"` | Operating system |
 | `arch` | string | `"aarch64"` / `"x86_64"` | CPU architecture |
+| `identity_degraded` | boolean | `false` | (JS side) True when install_id IO failed at startup |
 
 **Additional context properties** (automatically attached by Rust layer):
 - `os_version`: OS version string (e.g., `"14.5"` for macOS, `"10.0.19045"` for Windows). Provided by `os_info` crate.
@@ -67,6 +68,8 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 - `duration_ms`, `error_code`, `target_id`
 
 **Error sanitization**: `error` / `detail` fields ≤300 chars, no absolute paths (PII).
+
+**Identity Degraded Mode** (fix-sentinel-degraded-flag): When Rust's install_id IO fails, identity is set to sentinel value `analytics-disabled`. The `analytics_identity` bridge returns `degraded: true`, causing JS to skip bootstrap (avoiding collapsing all degraded installs into a single fake `distinct_id`). All JS-side events from degraded installs carry `identity_degraded: true` as a baseline property. Rust-side capture becomes no-op in degraded mode.
 
 ---
 
