@@ -94,6 +94,16 @@ fn posthog_capture(event: &str, mut props: serde_json::Value) {
 const PANEL_W: f64 = 360.0;
 const GAP: f64 = 6.0;
 
+/// Get the panel_id for analytics correlation. Uses session_id as unique identifier.
+/// Falls back to "unknown" if identity is not initialized.
+/// Feature attribution: panel-close-paths (VAL-PAN-004).
+fn get_panel_id() -> String {
+    IDENTITY
+        .get()
+        .map(|(_, sid)| sid.clone())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 /// Compute panel physical position from tray icon rect.
 /// Panel right-edge aligns with tray icon right-edge; top sits below icon with gap.
 fn compute_panel_position(
@@ -584,14 +594,18 @@ pub fn run() {
                             return;
                         };
 
+                        let panel_id = get_panel_id();
+
                         // Toggle: if visible, hide
                         if panel.is_visible().unwrap_or(false) {
                             let _ = panel.hide();
-                            let _ = app.emit("panel-event", "hide");
                             // Native-side interaction proof, independent of the
                             // webview: during a hang, tray_click keeps flowing
                             // while $autocapture/panel_open stop → webview hang.
-                            posthog_capture("panel_close", serde_json::json!({ "via": "tray" }));
+                            posthog_capture("panel_close", serde_json::json!({ 
+                                "via": "tray",
+                                "panel_id": panel_id,
+                            }));
                             return;
                         }
 
@@ -623,22 +637,34 @@ pub fn run() {
                         let _ = panel.set_position(Position::Physical(PhysicalPosition::new(x, y)));
                         let _ = panel.show();
                         let _ = panel.set_focus();
-                        let _ = app.emit("panel-event", "show");
-                        posthog_capture("panel_open", serde_json::json!({ "via": "tray" }));
+                        posthog_capture("panel_open", serde_json::json!({ 
+                            "via": "tray",
+                            "panel_id": panel_id,
+                        }));
                     }
                 })
                 .build(app)?;
 
-            // Window events: blur → hide, close request → hide (don't exit)
+            // Window events: blur → hide + panel_close{via:blur},
+            // close request → hide + panel_close{via:close} (don't exit).
+            // All three close paths (tray/blur/close) now emit panel_close with
+            // the correct via value (VAL-PAN-001/002/003).
             let panel_for_blur = panel.clone();
             panel.on_window_event(move |e| match e {
                 WindowEvent::Focused(false) => {
                     let _ = panel_for_blur.hide();
-                    posthog_capture("panel_close", serde_json::json!({ "via": "blur" }));
+                    posthog_capture("panel_close", serde_json::json!({ 
+                        "via": "blur",
+                        "panel_id": get_panel_id(),
+                    }));
                 }
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     let _ = panel_for_blur.hide();
+                    posthog_capture("panel_close", serde_json::json!({ 
+                        "via": "close",
+                        "panel_id": get_panel_id(),
+                    }));
                 }
                 _ => {}
             });
