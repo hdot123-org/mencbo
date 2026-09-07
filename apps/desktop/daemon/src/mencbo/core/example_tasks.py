@@ -40,6 +40,11 @@ def write_maintenance_log() -> str:
     return _append_timestamp("example-maintenance.log")
 
 
+def raise_demo_error() -> None:
+    """示例失败任务：故意抛出 RuntimeError 演示 failed 状态。"""
+    raise RuntimeError("示例失败：故意演示 failed 状态")
+
+
 def get_tasks() -> list[TaskSpec]:
     """导出示例任务清单。
 
@@ -61,5 +66,12 @@ def get_tasks() -> list[TaskSpec]:
             schedule_value={"hour": 3, "minute": 0},
             handler=write_maintenance_log,
             timeout_sec=60,
+        ),
+        TaskSpec(
+            task_id="example:failure-demo",
+            display_name="示例·失败演示",
+            schedule_type="interval",
+            schedule_value={"minutes": 10},
+            handler=raise_demo_error,
         ),
     ]

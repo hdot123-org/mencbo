@@ -226,5 +226,10 @@ class TestExampleTasks:
     def test_registry_handlers_executable(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MENCBO_LOG_DIR", str(tmp_path))
         for spec in get_tasks():
-            result = spec.handler()
-            assert Path(result).exists()
+            if spec.task_id == "example:failure-demo":
+                # failure-demo 故意抛异常演示 failed 状态
+                with pytest.raises(RuntimeError, match="示例失败"):
+                    spec.handler()
+            else:
+                result = spec.handler()
+                assert Path(result).exists()
