@@ -4,6 +4,7 @@
   "description": "Default capabilities for the panel window",
   "windows": ["panel"],
   "permissions": [
-    "core:default"
+    "core:default",
+    "updater:default"
   ]
 }
