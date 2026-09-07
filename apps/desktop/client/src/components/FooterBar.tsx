@@ -1,7 +1,18 @@
 import { FolderOpen, LogOut } from "lucide-react";
+import { useEffect, useState } from "react";
 import { inTauri } from "../lib/env";
 
 export function FooterBar() {
+  const [version, setVersion] = useState<string>("");
+
+  useEffect(() => {
+    if (!inTauri) return;
+    import("@tauri-apps/api/app")
+      .then(({ getVersion }) => getVersion())
+      .then((v) => setVersion(`v${v}`))
+      .catch(() => setVersion(""));
+  }, []);
+
   const handleOpenLogs = async () => {
     if (!inTauri) {
       console.log("[mock] open logs directory");
@@ -30,6 +41,13 @@ export function FooterBar() {
         <FolderOpen size={14} />
         打开日志目录
       </button>
+      <span
+        data-testid="app-version"
+        className="text-[11px] font-mono text-neutral-500 select-none"
+        title={version ? `当前版本 ${version}，有新版本时自动升级` : undefined}
+      >
+        {version}
+      </span>
       <button
         data-testid="quit-app"
         onClick={handleQuit}
