@@ -1,3 +1,5 @@
+mod identity;
+
 use serde_json::Value;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -5,23 +7,44 @@ use tauri::{
     Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WindowEvent,
 };
 use tauri_plugin_updater::UpdaterExt;
+use identity::{get_or_create_install_id, generate_launch_id};
 
-/// PostHog observability (project key is public by design — capture-only).
-const POSTHOG_KEY: &str = "phc_BKjuzVRSBJ26E49hUin3nKxxN2wX8BeD4pSgixUxpcfF";
+/// PostHog observability. Key is injected at build time via build.rs from POSTHOG_KEY env var.
+/// If POSTHOG_KEY is not set, falls back to "NO_KEY" sentinel and all captures become no-op.
+const POSTHOG_KEY: &str = env!("POSTHOG_KEY", "PostHog key must be provided via POSTHOG_KEY env var or defaults to NO_KEY");
 const POSTHOG_URL: &str = "https://us.i.posthog.com/capture/";
+
+/// Global identity state (install_id + session_id) for this app instance.
+/// Stored in a OnceLock to ensure thread-safe initialization.
+use std::sync::OnceLock;
+static IDENTITY: OnceLock<(String, String)> = OnceLock::new();
 
 /// Fire-and-forget analytics from the Rust side: own thread, short timeout,
 /// errors swallowed — must never block or kill the app (panic=abort profile).
-fn posthog_capture(event: &str, props: serde_json::Value) {
+/// Uses install_id as distinct_id and includes session_id in all events.
+fn posthog_capture(event: &str, mut props: serde_json::Value) {
+    // No-op if PostHog key is not configured (VAL-ENV-005)
+    if POSTHOG_KEY == "NO_KEY" {
+        return;
+    }
+
     let event = event.to_string();
+    let (install_id, session_id) = IDENTITY
+        .get()
+        .cloned()
+        .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
+
+    // Inject baseline properties into every event
+    if let Some(obj) = props.as_object_mut() {
+        obj.insert("session_id".to_string(), serde_json::Value::String(session_id));
+        obj.insert("source".to_string(), serde_json::Value::String("rust_native".to_string()));
+    }
+
     std::thread::spawn(move || {
         let body = serde_json::json!({
             "api_key": POSTHOG_KEY,
             "event": event,
-            "distinct_id": format!(
-                "mencbo-{}",
-                std::env::var("USER").unwrap_or_else(|_| "unknown".into())
-            ),
+            "distinct_id": install_id,
             "properties": props,
         });
         let Ok(client) = reqwest::blocking::Client::builder()
@@ -162,6 +185,20 @@ fn resolve_daemon_dir() -> Result<String, String> {
 fn get_state() -> Result<Value, String> {
     let path = resolve_state_path();
     Ok(read_and_transform_state(&path))
+}
+
+/// Return the analytics identity (install_id + session_id) for JS-side bootstrap.
+/// This is the bridge command that the webview invokes to get the persistent
+/// install_id and the per-launch session_id from the Rust authority.
+#[tauri::command]
+fn analytics_identity() -> Result<Value, String> {
+    let (install_id, session_id) = IDENTITY
+        .get()
+        .ok_or_else(|| "Identity not initialized".to_string())?;
+    Ok(serde_json::json!({
+        "installId": install_id,
+        "sessionId": session_id,
+    }))
 }
 
 #[tauri::command]
@@ -314,12 +351,21 @@ pub fn run() {
             run_task,
             open_logs_dir,
             quit_app,
-            check_update
+            check_update,
+            analytics_identity
         ])
         .setup(|app| {
             // Hide Dock icon (macOS only)
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Initialize identity before any analytics events
+            let app_data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
+            let install_id = get_or_create_install_id(&app_data_dir).expect("Failed to get install_id");
+            let session_id = generate_launch_id();
+            IDENTITY
+                .set((install_id.clone(), session_id.clone()))
+                .expect("Identity already initialized");
 
             // Rust-side observability, independent of the webview: launch
             // marker + 5-min heartbeat. If rust_heartbeat keeps flowing while
