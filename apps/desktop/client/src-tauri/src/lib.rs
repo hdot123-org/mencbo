@@ -730,7 +730,7 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error building tauri application")
-        .run(|_handle, event| {
+        .run(|app_handle, event| {
             match event {
                 // FIX 1: Exit guard — must check code.is_none() before prevent_exit().
                 // tauri 2.11.5 prevent_exit() swallows ALL exit codes (including code:Some(0))
@@ -751,9 +751,12 @@ pub fn run() {
                         .unwrap_or(0);
                     
                     // Determine exit reason based on EXIT_INFO
+                    // Fallback: if we reach RunEvent::Exit, it's a controlled exit.
+                    // Truly abnormal exits (crash/kill) never reach this handler —
+                    // they're handled by the session marker mechanism (dirty exit on next launch).
                     let (reason, via) = EXIT_INFO.get()
                         .map(|(r, v)| (r.clone(), v.clone()))
-                        .unwrap_or_else(|| ("abnormal".to_string(), "unknown".to_string()));
+                        .unwrap_or_else(|| ("normal".to_string(), "system".to_string()));
                     
                     // Flush pending events first, then enqueue rust_exit
                     // Flush queue to send all pending events
@@ -771,7 +774,7 @@ pub fn run() {
                     let _ = analytics::flush_sync(std::time::Duration::from_secs(3));
                     
                     // Clear session marker after flush (normal exit)
-                    if let Ok(app_data_dir) = _handle.path().app_data_dir() {
+                    if let Ok(app_data_dir) = app_handle.path().app_data_dir() {
                         let _ = session_marker::clear_session_marker(&app_data_dir);
                     }
                 }
