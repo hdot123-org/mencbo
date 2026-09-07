@@ -9,6 +9,7 @@ const POSTHOG_HOST = "https://us.i.posthog.com";
 
 let launchedAt = 0;
 let analyticsReady = false;
+let identityDegraded = false; // fix-sentinel-degraded-flag: true when install_id IO failed
 
 // Event buffer: events captured before identity is ready are queued here
 // and flushed in order once register() completes (fixes session_id race).
@@ -50,7 +51,7 @@ export async function initAnalytics() {
 
   // Step 1: try to fetch identity from Rust (with 3s timeout)
   try {
-    const identityPromise = invoke<{ installId: string; sessionId: string; platform: string; arch: string }>(
+    const identityPromise = invoke<{ installId: string; sessionId: string; platform: string; arch: string; degraded?: boolean }>(
       "analytics_identity",
     );
     const timeoutPromise = new Promise<never>((_, reject) =>
@@ -60,6 +61,8 @@ export async function initAnalytics() {
     installId = identity.installId;
     sessionId = identity.sessionId;
     identityOk = true;
+    // fix-sentinel-degraded-flag: detect degraded mode from Rust
+    identityDegraded = identity.degraded === true;
     // Store platform/arch from Rust bridge (Fix 1: navigator.userAgent is unreliable on Apple Silicon)
     platform = identity.platform;
     arch = identity.arch;
@@ -67,9 +70,9 @@ export async function initAnalytics() {
     failReason = `invoke_failed: ${String(e).slice(0, 200)}`;
   }
 
-  // Step 2: init posthog — with bootstrap if identity succeeded
+  // Step 2: init posthog — with bootstrap if identity succeeded AND not degraded
   let initOk = false;
-  if (identityOk) {
+  if (identityOk && !identityDegraded) {
     try {
       posthog.init(POSTHOG_KEY, {
         api_host: POSTHOG_HOST,
@@ -84,6 +87,20 @@ export async function initAnalytics() {
       initOk = true;
     } catch (e) {
       failReason = `init_bootstrap_failed: ${String(e).slice(0, 200)}`;
+    }
+  } else if (identityOk && identityDegraded) {
+    // fix-sentinel-degraded-flag: degraded mode detected, skip bootstrap to avoid
+    // collapsing all degraded installs into fake distinct_id "analytics-disabled"
+    try {
+      posthog.init(POSTHOG_KEY, {
+        api_host: POSTHOG_HOST,
+        autocapture: true,
+        capture_pageview: false,
+        persistence: "memory",
+      });
+      initOk = true;
+    } catch (e) {
+      failReason = `init_degraded_failed: ${String(e).slice(0, 200)}`;
     }
   }
 
@@ -111,6 +128,7 @@ export async function initAnalytics() {
     const appVersion = await getVersion().catch(() => "unknown");
     
     // Register baseline properties for ALL paths (Fix 2: fallback path must have baselines)
+    // fix-sentinel-degraded-flag: include identity_degraded flag when install_id IO failed
     posthog.register({
       session_id: identityOk ? sessionId : "missing",
       source: "webview",
@@ -119,6 +137,8 @@ export async function initAnalytics() {
       environment: "production", // JS only runs in release builds after DEV gate
       platform: platform,
       arch: arch,
+      // fix-sentinel-degraded-flag: mark all events from degraded installs
+      identity_degraded: identityDegraded,
     });
 
     analyticsReady = true;
@@ -128,7 +148,13 @@ export async function initAnalytics() {
     // This fixes the race condition where state_load fires before session_id is set
     flushBufferedEvents();
 
-    // If identity failed, capture the diagnostic event first
+    // fix-sentinel-degraded-flag: in degraded mode, capture diagnostic event
+    // to make the degradation observable in PostHog
+    if (identityDegraded) {
+      capture("diag_identity_failed", { reason: "install_id_io_failed, identity degraded" });
+    }
+
+    // If identity failed (not degraded, but invoke/init failed), capture the diagnostic event
     if (!identityOk || failReason) {
       capture("diag_identity_failed", { reason: failReason });
     }

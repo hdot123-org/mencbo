@@ -14,6 +14,16 @@ generators:
   typescript: apps/desktop/client/src/lib/analytics-events.gen.ts
   rust: apps/desktop/client/src-tauri/src/analytics_events.rs
 
+# Baseline properties (automatically attached to all events)
+# These are registered at analytics initialization and persist across all captures
+baseline_properties:
+  # fix-sentinel-degraded-flag: marks events from degraded installs (install_id IO failure)
+  # When true, JS skips bootstrap to avoid collapsing all degraded installs into fake distinct_id
+  identity_degraded:
+    type: boolean
+    layer: webview
+    description: "True when install_id IO failed at startup, causing identity bootstrap to be skipped"
+
 # Event definitions
 # layer: rust | webview | both
 # status: active | deprecated
