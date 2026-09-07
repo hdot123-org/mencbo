@@ -16,11 +16,17 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-single-instance = "2"
 tokio = { version = "1", features = ["time"] }
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "default-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 notify = "7"
+uuid = { version = "1", features = ["v4", "v7"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }
 
 [profile.release]
 codegen-units = 1

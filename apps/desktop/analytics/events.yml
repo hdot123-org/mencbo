@@ -170,6 +170,13 @@ events:
       reason: string
     description: Unhandled promise rejection
 
+  diag_identity_failed:
+    layer: webview
+    status: active
+    props:
+      reason: string
+    description: Identity bootstrap failed (invoke or init failure)
+
   # === Deprecated Events (old names) ===
   quit:
     layer: rust

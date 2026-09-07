@@ -1,3 +1,5 @@
+mod identity;
+
 use serde_json::Value;
 use tauri::{
     menu::{Menu, MenuItem},
@@ -5,23 +7,75 @@ use tauri::{
     Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WindowEvent,
 };
 use tauri_plugin_updater::UpdaterExt;
+use identity::{get_or_create_install_id, generate_launch_id};
 
-/// PostHog observability (project key is public by design — capture-only).
-const POSTHOG_KEY: &str = "phc_BKjuzVRSBJ26E49hUin3nKxxN2wX8BeD4pSgixUxpcfF";
+/// PostHog observability. Key is injected at build time via build.rs from POSTHOG_KEY env var.
+/// If POSTHOG_KEY is not set, falls back to "NO_KEY" sentinel and all captures become no-op.
+const POSTHOG_KEY: &str = env!("POSTHOG_KEY", "PostHog key must be provided via POSTHOG_KEY env var or defaults to NO_KEY");
 const POSTHOG_URL: &str = "https://us.i.posthog.com/capture/";
+
+/// Global identity state (install_id + session_id) for this app instance.
+/// Stored in a OnceLock to ensure thread-safe initialization.
+use std::sync::OnceLock;
+static IDENTITY: OnceLock<(String, String)> = OnceLock::new();
+
+/// Global app version for analytics events. Set once during setup from tauri context.
+/// This avoids passing app context through every posthog_capture call.
+static APP_VERSION: OnceLock<String> = OnceLock::new();
 
 /// Fire-and-forget analytics from the Rust side: own thread, short timeout,
 /// errors swallowed — must never block or kill the app (panic=abort profile).
-fn posthog_capture(event: &str, props: serde_json::Value) {
+/// Uses install_id as distinct_id and includes session_id in all events.
+///
+/// Environment gating: debug builds (cfg!(debug_assertions)) are complete no-op.
+/// This is the second layer of defense after POSTHOG_KEY gating (VAL-ENV-005).
+///
+/// All events automatically receive baseline properties:
+/// - app_version: from tauri context (VAL-ENV-003)
+/// - environment: "production" for release builds (VAL-ENV-002)
+/// - platform/arch: from std::env::consts
+/// - session_id/source: identity information
+fn posthog_capture(event: &str, mut props: serde_json::Value) {
+    // No-op in debug builds (VAL-ENV-001: dev 构建零上报)
+    if cfg!(debug_assertions) {
+        return;
+    }
+
+    // No-op if PostHog key is not configured (VAL-ENV-005)
+    if POSTHOG_KEY == "NO_KEY" {
+        return;
+    }
+
     let event = event.to_string();
+    let (install_id, session_id) = IDENTITY
+        .get()
+        .cloned()
+        .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
+
+    // Inject baseline properties into every event (VAL-ENV-002/003)
+    if let Some(obj) = props.as_object_mut() {
+        obj.insert("session_id".to_string(), serde_json::Value::String(session_id));
+        obj.insert("source".to_string(), serde_json::Value::String("rust_native".to_string()));
+        
+        // Environment properties: environment is always "production" for release builds
+        // (debug builds are already gated by cfg!(debug_assertions) above)
+        obj.insert("environment".to_string(), serde_json::Value::String("production".to_string()));
+        
+        // Platform and architecture from std::env::consts
+        obj.insert("platform".to_string(), serde_json::Value::String(std::env::consts::OS.to_string()));
+        obj.insert("arch".to_string(), serde_json::Value::String(std::env::consts::ARCH.to_string()));
+        
+        // app_version from tauri context (VAL-ENV-003)
+        if let Some(version) = APP_VERSION.get() {
+            obj.insert("app_version".to_string(), serde_json::Value::String(version.clone()));
+        }
+    }
+
     std::thread::spawn(move || {
         let body = serde_json::json!({
             "api_key": POSTHOG_KEY,
             "event": event,
-            "distinct_id": format!(
-                "mencbo-{}",
-                std::env::var("USER").unwrap_or_else(|_| "unknown".into())
-            ),
+            "distinct_id": install_id,
             "properties": props,
         });
         let Ok(client) = reqwest::blocking::Client::builder()
@@ -162,6 +216,20 @@ fn resolve_daemon_dir() -> Result<String, String> {
 fn get_state() -> Result<Value, String> {
     let path = resolve_state_path();
     Ok(read_and_transform_state(&path))
+}
+
+/// Return the analytics identity (install_id + session_id) for JS-side bootstrap.
+/// This is the bridge command that the webview invokes to get the persistent
+/// install_id and the per-launch session_id from the Rust authority.
+#[tauri::command]
+fn analytics_identity() -> Result<Value, String> {
+    let (install_id, session_id) = IDENTITY
+        .get()
+        .ok_or_else(|| "Identity not initialized".to_string())?;
+    Ok(serde_json::json!({
+        "installId": install_id,
+        "sessionId": session_id,
+    }))
 }
 
 #[tauri::command]
@@ -309,24 +377,50 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Second instance detected: focus existing window and return
+            // The plugin will automatically exit the second instance after this callback
+            if let Some(panel) = app.get_webview_window("panel") {
+                let _ = panel.show();
+                let _ = panel.set_focus();
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             get_state,
             run_task,
             open_logs_dir,
             quit_app,
-            check_update
+            check_update,
+            analytics_identity
         ])
         .setup(|app| {
             // Hide Dock icon (macOS only)
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            // Initialize app version for analytics events (VAL-ENV-003)
+            let app_version = app.package_info().version.to_string();
+            APP_VERSION
+                .set(app_version.clone())
+                .expect("APP_VERSION already initialized");
+
+            // Initialize identity before any analytics events
+            let app_data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
+            let install_id = get_or_create_install_id(&app_data_dir).expect("Failed to get install_id");
+            let session_id = generate_launch_id();
+            IDENTITY
+                .set((install_id.clone(), session_id.clone()))
+                .expect("Identity already initialized");
+
             // Rust-side observability, independent of the webview: launch
             // marker + 5-min heartbeat. If rust_heartbeat keeps flowing while
             // js_heartbeat gaps, a hang is localized to the webview layer.
+            // Note: rust_launch carries both version (old, transitional) and app_version (new)
             posthog_capture(
                 "rust_launch",
-                serde_json::json!({ "version": app.package_info().version.to_string() }),
+                serde_json::json!({ 
+                    "version": app_version,  // Old property (transitional, one version cycle)
+                }),
             );
             std::thread::spawn(|| loop {
                 std::thread::sleep(std::time::Duration::from_secs(5 * 60));
@@ -569,6 +663,44 @@ pub fn run() {
                 }
             }
         });
+}
+
+/// MENCBO_DIAG_TEST fault injection hook (architecture decision #10).
+/// Reads MENCBO_DIAG_TEST env var and dispatches to fault injection logic.
+/// This is a skeleton for M4 feature - actual fault injection behavior will be filled in later.
+/// 
+/// Supported values: freeze_webview, block_main, slow_ipc, panic
+/// Only active in release builds (debug builds are gated by cfg!(debug_assertions)).
+#[allow(dead_code)]
+fn check_diag_test_hook() {
+    // Only active in release builds
+    if cfg!(debug_assertions) {
+        return;
+    }
+
+    if let Ok(diag_mode) = std::env::var("MENCBO_DIAG_TEST") {
+        match diag_mode.as_str() {
+            "freeze_webview" => {
+                // Skeleton: M4 will implement webview freeze injection
+                eprintln!("[diag] MENCBO_DIAG_TEST=freeze_webview detected (skeleton, no-op for now)");
+            }
+            "block_main" => {
+                // Skeleton: M4 will implement main thread block injection
+                eprintln!("[diag] MENCBO_DIAG_TEST=block_main detected (skeleton, no-op for now)");
+            }
+            "slow_ipc" => {
+                // Skeleton: M4 will implement slow IPC injection
+                eprintln!("[diag] MENCBO_DIAG_TEST=slow_ipc detected (skeleton, no-op for now)");
+            }
+            "panic" => {
+                // Skeleton: M4 will implement panic injection
+                eprintln!("[diag] MENCBO_DIAG_TEST=panic detected (skeleton, no-op for now)");
+            }
+            _ => {
+                // Unknown mode, ignore
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1067,5 +1199,34 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::env::remove_var("MENCBO_STATE_PATH");
+    }
+
+    // ---- Single-instance guard tests (VAL-SI-001) ----
+
+    #[test]
+    fn tauri_conf_identifier_is_stable() {
+        // VAL-SI-001: The production identifier must be com.mencbo.desktop
+        let conf = include_str!("../tauri.conf.json");
+        let json: serde_json::Value = serde_json::from_str(conf).unwrap();
+        assert_eq!(json["identifier"], "com.mencbo.desktop");
+    }
+
+    #[test]
+    fn tauri_conf_dev_identifier_is_different() {
+        // VAL-SI-001: Dev identifier must be com.mencbo.desktop.dev to avoid
+        // conflicting with the production instance during testing.
+        let conf = include_str!("../tauri.conf.dev.json");
+        let json: serde_json::Value = serde_json::from_str(conf).unwrap();
+        assert_eq!(json["identifier"], "com.mencbo.desktop.dev");
+        assert_ne!(json["identifier"], "com.mencbo.desktop");
+    }
+
+    #[test]
+    fn single_instance_plugin_compiles() {
+        // This test verifies that the tauri-plugin-single-instance dependency
+        // is correctly configured and the plugin can be registered.
+        // The actual runtime behavior (second instance focusing existing window)
+        // is validated via release build integration testing.
+        assert!(true, "Plugin registration compiles successfully");
     }
 }

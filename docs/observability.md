@@ -1,7 +1,6 @@
 # MenCbo Desktop Observability Standard v1.1
 
-> **Source**: `posthog-desktop-monitoring-standard-v1.1` (memory/docs/)
-> **Canonical decision record**: `memory/docs/posthog-desktop-monitoring-standard-v1.1.md`
+> **Source**: 监控标准 v1.1, 2026-09-07, mission library
 > **Single source of truth for events**: `apps/desktop/analytics/events.yml`
 > **Date**: 2026-09-07
 
@@ -15,7 +14,7 @@
 | `session_id` | `launch_id` (uuidv7) | Rust | Generated per startup, bridges to webview via Tauri command. |
 | User identity | via `setPersonProperties` | Both | Optional; use `$create_alias` if needed. Never call `identify()` alone. |
 
-**Status**: Planned for P0 implementation. Current code uses `mencbo-{USER}` (Rust) and anonymous UUIDv7 (webview).
+**Status**: Implemented in P0 (PR #41). Identity unified as `desktop-{uuidv4}` with environment gating.
 
 ### Identity Injection (P0)
 
@@ -48,7 +47,7 @@ posthog.register({ session_id: id.sessionId });
 
 ## 3. Property Contract
 
-All events **must** include baseline properties (P0 implementation pending):
+All events **must** include baseline properties (P0 implemented in PR #41):
 
 | Property | Type | Example | Description |
 |----------|------|---------|-------------|
@@ -73,7 +72,7 @@ All events **must** include baseline properties (P0 implementation pending):
 | Debug (`cfg!(debug_assertions)` / `import.meta.env.DEV`) | **No-op** — no events sent |
 | Release | Full reporting with `environment: "production"` |
 
-**Status**: Planned for P0. Current code reports from both debug and release builds.
+**Status**: Implemented in P0 (PR #41). Debug builds no-op; release builds report with `environment: "production"`.
 
 ---
 
@@ -136,6 +135,7 @@ All events **must** include baseline properties (P0 implementation pending):
 |-------|-------|---------|------------|
 | `js_error` | webview | Frontend error | `message` |
 | `js_unhandled_rejection` | webview | Unhandled rejection | `reason` |
+| `diag_identity_failed` | webview | Identity bootstrap failed | `reason` |
 
 ### Planned Events (v1.1 Standard)
 
@@ -241,7 +241,7 @@ POST /api/projects/597439/query
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| **P0** | Identity unification (`desktop-{uuidv4}`), environment gate, `app_version` | Planned |
+| **P0** | Identity unification (`desktop-{uuidv4}`), environment gate, `app_version` | Completed |
 | **P1** | `rust_exit` (normal + dirty), flush on exit, per-event timestamp, heartbeat seq | Planned |
 | **P2** | Watchdog diagnostics (`diag_*` events), error-gateway integration | Planned |
 | **P3** | Registry codegen, type safety, drift audit | In progress (this PR) |
@@ -254,3 +254,31 @@ POST /api/projects/597439/query
 - **ID**: 597439
 - **Host**: us.posthog.com
 - **Capture key**: Public by design (capture-only, no security boundary)
+
+注意：`query` 字段必须是对象；`/api/projects/<id>/events/` 列表端点不可用（持续 server error）。
+
+## 验证（Validation）
+
+### 单实例守卫（Single-Instance Guard）
+
+接入 Tauri 2 官方 `tauri-plugin-single-instance` 插件：同一 bundle identifier 已运行时，再次启动聚焦既有主窗口/面板后立即退出，不产生可见双实例。
+
+**实现**：`src-tauri/src/lib.rs` 中 `.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { ... }))` 注册回调，二次启动时 `panel.show()` + `panel.set_focus()`，插件随后自动终止新进程。
+
+**测试构建隔离**：测试/开发构建使用 `tauri.conf.dev.json` 覆盖 identifier 为 `com.mencbo.desktop.dev`，确保与用户正式实例（`com.mencbo.desktop`）互不冲突、互不抢占。使用方式：
+
+```bash
+# 开发构建：使用 dev identifier（不抢占生产实例）
+pnpm -F desktop-client tauri dev --config src-tauri/tauri.conf.dev.json
+
+# 构建 dev bundle
+pnpm -F desktop-client tauri build --config src-tauri/tauri.conf.dev.json
+```
+
+Dev 构建使用独立 `app_data_dir`（`com.mencbo.desktop.dev`），`install_id` 独立生成，PostHog 查询按该 `distinct_id` 过滤。
+
+**VAL-SI-001 验证**（2026-09-07 release 构建实测）：
+- 启动 release 产物（PID 41105，`target/release/bundle/macos/MenCbo.app`）
+- 二次启动同 identifier 产物（PID 41311）→ 5s 后 PID 41311 已退出
+- 仅剩 1 个 `desktop-client` 进程（原始实例）
+- 清理：`kill 41105`，验证无残留
