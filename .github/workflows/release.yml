@@ -52,10 +52,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Create release with auto-generated notes
+      - name: Create or update release with auto-generated notes
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists, updating"
+            gh release edit "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --latest
+          else
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+          fi
 
   npm-publish:
     name: Publish to npm
@@ -72,6 +78,7 @@ jobs:
     steps:
       - name: Skip notice
         if: env.NPM_TOKEN == ''
+        working-directory: .
         run: echo "::notice::NPM_TOKEN secret not configured — npm publish skipped"
 
       - uses: actions/checkout@v4
