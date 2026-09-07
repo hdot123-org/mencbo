@@ -95,9 +95,9 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 |-------|-------|---------|------------|
 | `rust_launch` | rust | Process startup | `version` |
 | `rust_exit` | rust | Process exit | `via: command\|tray_menu` |
-| `rust_heartbeat` | rust | Every 5 min | — |
+| `rust_heartbeat` | rust | Every 5 min | `seq` (monotonic within session, resets on restart) |
 | `js_launch` | webview | Webview init | — |
-| `js_heartbeat` | webview | Every 5 min | `uptime_sec` |
+| `js_heartbeat` | webview | Every 5 min | `uptime_sec`, `seq` (monotonic within session, resets on restart) |
 
 ### Panel Events
 

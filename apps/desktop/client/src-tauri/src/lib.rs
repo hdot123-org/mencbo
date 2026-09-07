@@ -34,6 +34,107 @@ static STARTED_AT: OnceLock<std::time::Instant> = OnceLock::new();
 /// Architecture decision 4: rust_exit is the authoritative exit event.
 static EXIT_INFO: OnceLock<(String, String)> = OnceLock::new();
 
+/// Heartbeat sequence counter (标准 §6.1, VAL-REL-006).
+/// Increments monotonically within session_id scope, resets on process restart.
+/// Used to detect missing events: gap ≥10 minutes without filling = lost events.
+mod heartbeat_seq {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Heartbeat sequence counter that resets on each new process.
+    /// Thread-safe via atomic operations.
+    #[derive(Debug)]
+    pub struct HeartbeatSeq {
+        counter: AtomicU64,
+    }
+
+    impl HeartbeatSeq {
+        /// Create a new counter starting from 0 (called once per process).
+        pub const fn new() -> Self {
+            Self {
+                counter: AtomicU64::new(0),
+            }
+        }
+
+        /// Get the next sequence number and increment.
+        /// First call returns 0, second returns 1, etc.
+        pub fn next(&self) -> u64 {
+            self.counter.fetch_add(1, Ordering::SeqCst)
+        }
+
+        /// Reset the counter to 0 (typically only used in tests).
+        #[cfg(test)]
+        pub fn reset(&self) {
+            self.counter.store(0, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn heartbeat_seq_starts_at_zero() {
+            let seq = HeartbeatSeq::new();
+            assert_eq!(seq.next(), 0, "First call must return 0");
+        }
+
+        #[test]
+        fn heartbeat_seq_increments_monotonically() {
+            let seq = HeartbeatSeq::new();
+            assert_eq!(seq.next(), 0);
+            assert_eq!(seq.next(), 1);
+            assert_eq!(seq.next(), 2);
+            assert_eq!(seq.next(), 3);
+        }
+
+        #[test]
+        fn heartbeat_seq_reset_returns_to_zero() {
+            let seq = HeartbeatSeq::new();
+            // Advance a few times
+            seq.next();
+            seq.next();
+            seq.next();
+            
+            // Reset
+            seq.reset();
+            
+            // Should start from 0 again
+            assert_eq!(seq.next(), 0, "After reset, must return 0");
+            assert_eq!(seq.next(), 1, "After reset, second call must return 1");
+        }
+
+        #[test]
+        fn heartbeat_seq_thread_safe() {
+            use std::sync::Arc;
+            use std::thread;
+
+            let seq = Arc::new(HeartbeatSeq::new());
+            let mut handles = vec![];
+
+            // Spawn 10 threads, each calling next() 100 times
+            for _ in 0..10 {
+                let seq_clone = Arc::clone(&seq);
+                handles.push(thread::spawn(move || {
+                    for _ in 0..100 {
+                        seq_clone.next();
+                    }
+                }));
+            }
+
+            // Wait for all threads
+            for handle in handles {
+                handle.join().unwrap();
+            }
+
+            // Final value should be 1000 (10 threads * 100 calls)
+            assert_eq!(seq.next(), 1000, "Thread-safe counter must reach 1000");
+        }
+    }
+}
+
+/// Global heartbeat sequence counter for Rust layer (VAL-REL-006).
+static RUST_HEARTBEAT_SEQ: heartbeat_seq::HeartbeatSeq = heartbeat_seq::HeartbeatSeq::new();
+
 /// Fire-and-forget analytics from the Rust side: enqueue to batch queue.
 /// The batch queue handles batching (20 items or 60s), retry with exponential backoff,
 /// and dropped event tracking (VAL-REL-001, VAL-REL-005).
@@ -513,7 +614,8 @@ pub fn run() {
             );
             std::thread::spawn(|| loop {
                 std::thread::sleep(std::time::Duration::from_secs(5 * 60));
-                posthog_capture("rust_heartbeat", serde_json::json!({}));
+                let seq = RUST_HEARTBEAT_SEQ.next();
+                posthog_capture("rust_heartbeat", serde_json::json!({"seq": seq}));
             });
 
             // Auto-update: check at startup, then every 6h. Silent download +

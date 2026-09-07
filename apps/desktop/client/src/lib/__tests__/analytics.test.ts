@@ -387,3 +387,66 @@ describe("analytics identity injection", () => {
     expect(captureCalls[1][0]).toBe("state_load");
   });
 });
+
+describe("heartbeat sequence counter (VAL-REL-006)", () => {
+  it("starts at zero", async () => {
+    const { createHeartbeatSeq } = await import("../analytics");
+    const seq = createHeartbeatSeq();
+    expect(seq.next()).toBe(0);
+  });
+
+  it("increments monotonically on each call", async () => {
+    const { createHeartbeatSeq } = await import("../analytics");
+    const seq = createHeartbeatSeq();
+    expect(seq.next()).toBe(0);
+    expect(seq.next()).toBe(1);
+    expect(seq.next()).toBe(2);
+    expect(seq.next()).toBe(3);
+  });
+
+  it("reset returns counter to zero", async () => {
+    const { createHeartbeatSeq } = await import("../analytics");
+    const seq = createHeartbeatSeq();
+    seq.next();
+    seq.next();
+    seq.next();
+    expect(seq.get()).toBe(3);
+    
+    seq.reset();
+    expect(seq.get()).toBe(0);
+    expect(seq.next()).toBe(0);
+    expect(seq.next()).toBe(1);
+  });
+
+  it("heartbeat emits seq in capture props", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const mockInvoke = vi.mocked(invoke);
+    mockInvoke.mockResolvedValue({
+      installId: "desktop-test-uuid-1234",
+      sessionId: "session-5678",
+    });
+
+    vi.useFakeTimers();
+    const { initAnalytics } = await import("../analytics");
+    await initAnalytics();
+
+    // Clear previous calls
+    vi.mocked(posthog.capture).mockClear();
+
+    // Advance time by 5 minutes to trigger heartbeat
+    vi.advanceTimersByTime(5 * 60 * 1000);
+
+    // Verify js_heartbeat was captured with seq
+    const heartbeatCalls = vi.mocked(posthog.capture).mock.calls.filter(
+      (call) => call[0] === "js_heartbeat"
+    );
+    expect(heartbeatCalls.length).toBe(1);
+    expect(heartbeatCalls[0][1]).toEqual(
+      expect.objectContaining({
+        app: "mencbo-desktop",
+        seq: expect.any(Number),
+        uptime_sec: expect.any(Number),
+      })
+    );
+  });
+});
