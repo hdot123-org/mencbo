@@ -1,96 +1,154 @@
-import { describe, it, expect } from 'vitest';
-import { MOCK_STATE } from '../test/fixtures';
-import type { State } from '../types';
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
-describe('VAL-STATE-007: browser mock data layer', () => {
-  describe('MOCK_STATE contains all demo statuses', () => {
-    it('should have exactly 3 tasks', () => {
-      expect(MOCK_STATE.tasks).toHaveLength(3);
-    });
+// Mock @tauri-apps/api modules
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(),
+}));
 
-    it('should contain at least one success task', () => {
-      const successTasks = MOCK_STATE.tasks.filter(t => t.status === 'success');
-      expect(successTasks.length).toBeGreaterThan(0);
-    });
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(() => Promise.resolve(() => {})),
+}));
 
-    it('should contain at least one running task', () => {
-      const runningTasks = MOCK_STATE.tasks.filter(t => t.status === 'running');
-      expect(runningTasks.length).toBeGreaterThan(0);
-    });
+// Mock env.ts to control inTauri
+vi.mock("./env", () => ({
+  get inTauri() {
+    return (globalThis as any).__TEST_IN_TAURI ?? false;
+  },
+}));
 
-    it('should contain at least one failed task', () => {
-      const failedTasks = MOCK_STATE.tasks.filter(t => t.status === 'failed');
-      expect(failedTasks.length).toBeGreaterThan(0);
-    });
+describe("loadState (browser mode)", () => {
+  beforeEach(() => {
+    (globalThis as any).__TEST_IN_TAURI = false;
+    vi.resetModules();
   });
 
-  describe('triggerTask mock behavior', () => {
-    it('should resolve without error in browser mode', async () => {
-      // Dynamically import to test browser fallback
-      const { triggerTask } = await import('./state');
-
-      // In browser mode (non-Tauri), triggerTask should resolve without throwing
-      await expect(triggerTask('example:heartbeat')).resolves.not.toThrow();
-    });
-
-    it('should handle various task IDs without error', async () => {
-      const { triggerTask } = await import('./state');
-
-      await expect(triggerTask('example:heartbeat')).resolves.toBeUndefined();
-      await expect(triggerTask('example:maintenance')).resolves.toBeUndefined();
-      await expect(triggerTask('example:failure-demo')).resolves.toBeUndefined();
-      await expect(triggerTask('nonexistent:task')).resolves.toBeUndefined();
-    });
+  afterEach(() => {
+    delete (globalThis as any).__TEST_IN_TAURI;
+    vi.unstubAllGlobals();
   });
 
-  describe('loadState mock behavior', () => {
-    it('should return MOCK_STATE in browser mode', async () => {
-      const { loadState } = await import('./state');
-
-      const state = await loadState();
-
-      // Should return mock state with all required fields
-      expect(state).toBeDefined();
-      expect(state.mock).toBe(true);
-      expect(state.tasks).toBeInstanceOf(Array);
-      expect(state.tasks.length).toBe(3);
-    });
-
-    it('should return state with correct task structure', async () => {
-      const { loadState } = await import('./state');
-
-      const state = await loadState();
-
-      state.tasks.forEach(task => {
-        expect(task).toHaveProperty('id');
-        expect(task).toHaveProperty('name');
-        expect(task).toHaveProperty('status');
-        expect(['success', 'running', 'failed']).toContain(task.status);
-      });
-    });
+  it("returns mock state with default scenario", async () => {
+    const { loadState } = await import("./state");
+    const result = await loadState();
+    expect(result.mock).toBe(true);
+    expect(result.tasks).toHaveLength(3);
+    expect(result.tasks.map((t: any) => t.id).sort()).toEqual([
+      "example:failure-demo",
+      "example:heartbeat",
+      "example:maintenance",
+    ]);
   });
 
-  describe('subscribeState mock behavior', () => {
-    it('should return unsubscribe function', async () => {
-      const { subscribeState } = await import('./state');
+  it("returns mock state with ok scenario (2 tasks, no failure)", async () => {
+    // Stub globalThis.location so getScenario() sees the query param
+    vi.stubGlobal("location", { search: "?scenario=ok" });
+    // Also need to stub window since getScenario checks typeof window
+    vi.stubGlobal("window", { location: { search: "?scenario=ok" } });
+    const { loadState } = await import("./state");
+    const result = await loadState();
+    expect(result.mock).toBe(true);
+    expect(result.tasks).toHaveLength(2);
+    expect(result.tasks.every((t: any) => t.status !== "failed")).toBe(true);
+  });
 
-      const callback = (_state: State) => {};
-      const unsubscribe = subscribeState(callback);
+  it("returns mock state with empty scenario (0 tasks)", async () => {
+    vi.stubGlobal("location", { search: "?scenario=empty" });
+    vi.stubGlobal("window", { location: { search: "?scenario=empty" } });
+    const { loadState } = await import("./state");
+    const result = await loadState();
+    expect(result.mock).toBe(true);
+    expect(result.tasks).toHaveLength(0);
+  });
+});
 
-      expect(typeof unsubscribe).toBe('function');
+describe("loadState (Tauri mode)", () => {
+  beforeEach(() => {
+    (globalThis as any).__TEST_IN_TAURI = true;
+    vi.resetModules();
+  });
 
-      // Should not throw when called
-      expect(() => unsubscribe()).not.toThrow();
-    });
+  afterEach(() => {
+    delete (globalThis as any).__TEST_IN_TAURI;
+    vi.restoreAllMocks();
+  });
 
-    it('should accept callback without error', async () => {
-      const { subscribeState } = await import('./state');
+  it("returns real state from Rust when not mock", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const realState = {
+      mock: false,
+      health: "ok",
+      tasks: [
+        {
+          id: "test:task",
+          name: "Test Task",
+          status: "success",
+          lastRun: new Date().toISOString(),
+          durationMs: 123,
+        },
+      ],
+    };
+    vi.mocked(invoke).mockResolvedValue(realState);
 
-      const callback = (state: State) => {
-        expect(state).toBeDefined();
-      };
+    const { loadState } = await import("./state");
+    const result = await loadState();
+    expect(result).toEqual(realState);
+  });
 
-      expect(() => subscribeState(callback)).not.toThrow();
-    });
+  it("falls back to built-in mock when Rust returns {mock: true, tasks: []} (VAL-CROSS-005)", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockResolvedValue({ mock: true, tasks: [] });
+
+    const { loadState } = await import("./state");
+    const result = await loadState();
+    // Should fall back to built-in mock fixture (3 demo tasks)
+    expect(result.mock).toBe(true);
+    expect(result.tasks).toHaveLength(3);
+    const ids = result.tasks.map((t) => t.id).sort();
+    expect(ids).toEqual([
+      "example:failure-demo",
+      "example:heartbeat",
+      "example:maintenance",
+    ]);
+  });
+
+  it("falls back to built-in mock when invoke throws", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockRejectedValue(new Error("Tauri not available"));
+
+    const { loadState } = await import("./state");
+    const result = await loadState();
+    expect(result.mock).toBe(true);
+    expect(result.tasks).toHaveLength(3);
+  });
+});
+
+describe("triggerTask", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    delete (globalThis as any).__TEST_IN_TAURI;
+    vi.restoreAllMocks();
+  });
+
+  it("calls invoke in Tauri mode", async () => {
+    (globalThis as any).__TEST_IN_TAURI = true;
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    const { triggerTask } = await import("./state");
+    await triggerTask("test:task");
+
+    expect(invoke).toHaveBeenCalledWith("run_task", { task: "test:task" });
+  });
+
+  it("logs to console in browser mode without throwing", async () => {
+    (globalThis as any).__TEST_IN_TAURI = false;
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const { triggerTask } = await import("./state");
+    await expect(triggerTask("test:task")).resolves.toBeUndefined();
+    expect(consoleSpy).toHaveBeenCalledWith("[mock] trigger task:", "test:task");
   });
 });

@@ -1,107 +1,109 @@
-import { describe, it, expect } from 'vitest';
-import { formatRelativeTime, formatDuration } from './format';
+import { describe, expect, it } from "vitest";
+import { formatDuration, formatRelativeTime } from "./format";
 
-describe('formatRelativeTime', () => {
-  const baseTime = new Date('2024-01-01T12:00:00Z');
+describe("formatDuration", () => {
+  it("formats 0 as 0ms", () => {
+    expect(formatDuration(0)).toBe("0ms");
+  });
 
-  describe('VAL-PANEL-012: relative time pure function boundaries', () => {
-    it('should return "刚刚" for offset 0s', () => {
-      const target = new Date(baseTime.getTime() - 0 * 1000);
-      expect(formatRelativeTime(target.toISOString(), baseTime)).toBe('刚刚');
-    });
+  it("formats 12 as 12ms", () => {
+    expect(formatDuration(12)).toBe("12ms");
+  });
 
-    it('should return "刚刚" for offset 30s', () => {
-      const target = new Date(baseTime.getTime() - 30 * 1000);
-      expect(formatRelativeTime(target.toISOString(), baseTime)).toBe('刚刚');
-    });
+  it("formats 320 as 320ms", () => {
+    expect(formatDuration(320)).toBe("320ms");
+  });
 
-    it('should return "刚刚" for offset 59s', () => {
-      const target = new Date(baseTime.getTime() - 59 * 1000);
-      expect(formatRelativeTime(target.toISOString(), baseTime)).toBe('刚刚');
-    });
+  it("formats 999 as 999ms", () => {
+    expect(formatDuration(999)).toBe("999ms");
+  });
 
-    it('should return "1 分钟前" for offset 60s', () => {
-      const target = new Date(baseTime.getTime() - 60 * 1000);
-      expect(formatRelativeTime(target.toISOString(), baseTime)).toBe('1 分钟前');
-    });
+  it("formats 1000 as 1.0s (one decimal, not 1s)", () => {
+    expect(formatDuration(1000)).toBe("1.0s");
+  });
 
-    it('should return "59 分钟前" for offset 3599s', () => {
-      const target = new Date(baseTime.getTime() - 3599 * 1000);
-      expect(formatRelativeTime(target.toISOString(), baseTime)).toBe('59 分钟前');
-    });
+  it("formats 1234 as 1.2s", () => {
+    expect(formatDuration(1234)).toBe("1.2s");
+  });
 
-    it('should return "1 小时前" for offset 3600s', () => {
-      const target = new Date(baseTime.getTime() - 3600 * 1000);
-      expect(formatRelativeTime(target.toISOString(), baseTime)).toBe('1 小时前');
-    });
+  it("formats 59400 as 59.4s", () => {
+    expect(formatDuration(59400)).toBe("59.4s");
+  });
 
-    it('should return "23 小时前" for offset 86399s', () => {
-      const target = new Date(baseTime.getTime() - 86399 * 1000);
-      expect(formatRelativeTime(target.toISOString(), baseTime)).toBe('23 小时前');
-    });
+  it("formats 120000 as 120.0s (no minute conversion)", () => {
+    expect(formatDuration(120000)).toBe("120.0s");
+  });
 
-    it('should return "1 天前" for offset 86400s', () => {
-      const target = new Date(baseTime.getTime() - 86400 * 1000);
-      expect(formatRelativeTime(target.toISOString(), baseTime)).toBe('1 天前');
-    });
+  it("formats null as placeholder", () => {
+    const result = formatDuration(null);
+    expect(result).toBe("—");
+    expect(result).not.toContain("null");
+    expect(result).not.toContain("NaN");
+  });
 
-    it('should return "3 天前" for offset 259200s', () => {
-      const target = new Date(baseTime.getTime() - 259200 * 1000);
-      expect(formatRelativeTime(target.toISOString(), baseTime)).toBe('3 天前');
-    });
+  it("formats undefined as placeholder", () => {
+    const result = formatDuration(undefined);
+    expect(result).toBe("—");
+    expect(result).not.toContain("null");
+    expect(result).not.toContain("NaN");
   });
 });
 
-describe('formatDuration', () => {
-  describe('VAL-PANEL-013: duration formatting boundaries', () => {
-    it('should return "0ms" for 0', () => {
-      expect(formatDuration(0)).toBe('0ms');
-    });
+describe("formatRelativeTime", () => {
+  const base = new Date("2026-09-07T12:00:00+00:00");
 
-    it('should return "12ms" for 12', () => {
-      expect(formatDuration(12)).toBe('12ms');
-    });
-
-    it('should return "320ms" for 320', () => {
-      expect(formatDuration(320)).toBe('320ms');
-    });
-
-    it('should return "999ms" for 999', () => {
-      expect(formatDuration(999)).toBe('999ms');
-    });
-
-    it('should return "1.0s" for 1000', () => {
-      expect(formatDuration(1000)).toBe('1.0s');
-    });
-
-    it('should return "1.2s" for 1234', () => {
-      expect(formatDuration(1234)).toBe('1.2s');
-    });
-
-    it('should return "59.4s" for 59400', () => {
-      expect(formatDuration(59400)).toBe('59.4s');
-    });
-
-    it('should return "120.0s" for 120000', () => {
-      expect(formatDuration(120000)).toBe('120.0s');
-    });
+  it("formats 0s as 刚刚", () => {
+    const target = new Date(base.getTime() - 0 * 1000);
+    expect(formatRelativeTime(target.toISOString(), base)).toBe("刚刚");
   });
 
-  describe('VAL-PANEL-013: null handling', () => {
-    it('should handle null without throwing', () => {
-      expect(() => formatDuration(null)).not.toThrow();
-    });
+  it("formats 30s as 刚刚", () => {
+    const target = new Date(base.getTime() - 30 * 1000);
+    expect(formatRelativeTime(target.toISOString(), base)).toBe("刚刚");
+  });
 
-    it('should return "—" for null', () => {
-      expect(formatDuration(null)).toBe('—');
-    });
+  it("formats 59s as 刚刚", () => {
+    const target = new Date(base.getTime() - 59 * 1000);
+    expect(formatRelativeTime(target.toISOString(), base)).toBe("刚刚");
+  });
 
-    it('should handle undefined without throwing', () => {
-      expect(() => formatDuration(undefined)).not.toThrow();
-    });
+  it("formats 60s as 1 分钟前", () => {
+    const target = new Date(base.getTime() - 60 * 1000);
+    expect(formatRelativeTime(target.toISOString(), base)).toBe("1 分钟前");
+  });
 
-    it('should return "—" for undefined', () => {
-      expect(formatDuration(undefined)).toBe('—');
-    });
+  it("formats 3599s as 59 分钟前", () => {
+    const target = new Date(base.getTime() - 3599 * 1000);
+    expect(formatRelativeTime(target.toISOString(), base)).toBe("59 分钟前");
+  });
+
+  it("formats 3600s as 1 小时前", () => {
+    const target = new Date(base.getTime() - 3600 * 1000);
+    expect(formatRelativeTime(target.toISOString(), base)).toBe("1 小时前");
+  });
+
+  it("formats 86399s as 23 小时前", () => {
+    const target = new Date(base.getTime() - 86399 * 1000);
+    expect(formatRelativeTime(target.toISOString(), base)).toBe("23 小时前");
+  });
+
+  it("formats 86400s as 1 天前", () => {
+    const target = new Date(base.getTime() - 86400 * 1000);
+    expect(formatRelativeTime(target.toISOString(), base)).toBe("1 天前");
+  });
+
+  it("formats 259200s (3 days) as 3 天前", () => {
+    const target = new Date(base.getTime() - 259200 * 1000);
+    expect(formatRelativeTime(target.toISOString(), base)).toBe("3 天前");
+  });
+
+  it("formats null as placeholder", () => {
+    const result = formatRelativeTime(null, base);
+    expect(result).toBe("—");
+  });
+
+  it("handles invalid ISO gracefully", () => {
+    const result = formatRelativeTime("not-a-date", base);
+    expect(result).toBe("—");
   });
 });
