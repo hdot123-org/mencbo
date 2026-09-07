@@ -1,6 +1,6 @@
 # MenCbo Monorepo
 
-<p align="center"><img src="docs/logo.jpeg" alt="MenCbo" width="480"></p>
+<p align="center"><img src="docs/logo.png" alt="MenCbo" width="320"></p>
 
 [![CI](https://github.com/hdot123-org/mencbo/actions/workflows/ci.yml/badge.svg)](https://github.com/hdot123-org/mencbo/actions/workflows/ci.yml)
 
