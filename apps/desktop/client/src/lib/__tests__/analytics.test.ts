@@ -184,6 +184,92 @@ describe("analytics identity injection", () => {
     );
   });
 
+  it("fix-sentinel-degraded-flag: degraded mode skips bootstrap and marks identity_degraded", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const mockInvoke = vi.mocked(invoke);
+    // Simulate degraded mode: Rust returns sentinel values with degraded=true
+    mockInvoke.mockResolvedValue({
+      installId: "analytics-disabled",
+      sessionId: "analytics-disabled",
+      platform: "darwin",
+      arch: "aarch64",
+      degraded: true,
+    });
+
+    const { initAnalytics } = await import("../analytics");
+    await initAnalytics();
+
+    // Verify posthog.init was called WITHOUT bootstrap (degraded mode skips it)
+    const initCalls = vi.mocked(posthog.init).mock.calls;
+    expect(initCalls.length).toBe(1);
+    const initOptions = initCalls[0][1] as any;
+    expect(initOptions.bootstrap).toBeUndefined();
+
+    // Verify register includes identity_degraded: true
+    expect(posthog.register).toHaveBeenCalledWith(
+      expect.objectContaining({
+        identity_degraded: true,
+        session_id: "analytics-disabled",
+        source: "webview",
+      })
+    );
+
+    // Verify diagnostic event captured for degraded mode
+    expect(posthog.capture).toHaveBeenCalledWith(
+      "diag_identity_failed",
+      expect.objectContaining({
+        app: "mencbo-desktop",
+        reason: expect.stringContaining("identity degraded"),
+      })
+    );
+
+    // js_launch should still be captured (analytics observable even when degraded)
+    expect(posthog.capture).toHaveBeenCalledWith(
+      "js_launch",
+      expect.objectContaining({ app: "mencbo-desktop" })
+    );
+  });
+
+  it("fix-sentinel-degraded-flag: normal mode uses bootstrap and sets identity_degraded:false", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const mockInvoke = vi.mocked(invoke);
+    // Normal mode: valid identity with degraded=false
+    mockInvoke.mockResolvedValue({
+      installId: "desktop-normal-uuid-1234",
+      sessionId: "session-normal-5678",
+      platform: "darwin",
+      arch: "aarch64",
+      degraded: false,
+    });
+
+    const { initAnalytics } = await import("../analytics");
+    await initAnalytics();
+
+    // Verify posthog.init was called WITH bootstrap (normal mode)
+    expect(posthog.init).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        bootstrap: {
+          distinctID: "desktop-normal-uuid-1234",
+          isIdentifiedID: true,
+        },
+      })
+    );
+
+    // Verify register includes identity_degraded: false
+    expect(posthog.register).toHaveBeenCalledWith(
+      expect.objectContaining({
+        identity_degraded: false,
+        session_id: "session-normal-5678",
+      })
+    );
+
+    // Verify NO diagnostic event for normal mode
+    const captureCalls = vi.mocked(posthog.capture).mock.calls;
+    const diagCalls = captureCalls.filter(call => call[0] === "diag_identity_failed");
+    expect(diagCalls.length).toBe(0);
+  });
+
   it("buffers events captured before identity is ready (race condition fix)", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     const mockInvoke = vi.mocked(invoke);

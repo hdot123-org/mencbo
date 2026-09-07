@@ -218,16 +218,26 @@ fn get_state() -> Result<Value, String> {
 /// Also returns platform/arch from std::env::consts so the JS side uses the
 /// same values as Rust (fix-m1-review-findings: navigator.userAgent parsing
 /// is unreliable on Apple Silicon — it reports x86_64 under Rosetta).
+///
+/// **Degraded mode** (fix-sentinel-degraded-flag): If install_id IO failed at startup,
+/// returns `degraded: true` with sentinel values. JS must skip bootstrap and mark all
+/// events with `identity_degraded: true` to avoid collapsing all degraded installs
+/// into a single fake distinct_id "analytics-disabled".
 #[tauri::command]
 fn analytics_identity() -> Result<Value, String> {
     let (install_id, session_id) = IDENTITY
         .get()
         .ok_or_else(|| "Identity not initialized".to_string())?;
+    
+    // Detect degraded mode: sentinel values indicate install_id IO failure
+    let degraded = install_id == "analytics-disabled";
+    
     Ok(serde_json::json!({
         "installId": install_id,
         "sessionId": session_id,
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
+        "degraded": degraded,
     }))
 }
 
