@@ -6,6 +6,9 @@ import posthog from "posthog-js";
 
 // Mock VITE_POSTHOG_KEY environment variable before importing analytics
 vi.stubEnv("VITE_POSTHOG_KEY", "test-key-12345");
+// Mock DEV to false so tests can exercise the full analytics flow
+// (in real dev environment, DEV=true and initAnalytics returns early)
+vi.stubEnv("DEV", false);
 
 // Mock posthog-js
 vi.mock("posthog-js", () => ({
@@ -81,10 +84,16 @@ describe("analytics identity injection", () => {
     const { initAnalytics } = await import("../analytics");
     await initAnalytics();
 
-    expect(posthog.register).toHaveBeenCalledWith({
-      session_id: "session-5678",
-      source: "webview",
-    });
+    expect(posthog.register).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: "session-5678",
+        source: "webview",
+        environment: "production",
+        app_version: expect.any(String),
+        platform: expect.any(String),
+        arch: expect.any(String),
+      })
+    );
   });
 
   it("no random anonymous distinct_id", async () => {
