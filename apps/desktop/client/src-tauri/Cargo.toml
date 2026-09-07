@@ -1,6 +1,6 @@
 [package]
 name = "desktop-client"
-version = "0.2.3"
+version = "0.2.4"
 description = "MenCbo Desktop Client"
 authors = ["mencbo"]
 edition = "2021"

@@ -1,11 +1,10 @@
+use serde_json::Value;
 use tauri::{
-    Manager, PhysicalPosition, PhysicalSize, Position, Size,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    WindowEvent, Emitter,
+    Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WindowEvent,
 };
 use tauri_plugin_updater::UpdaterExt;
-use serde_json::Value;
 
 /// PostHog observability (project key is public by design — capture-only).
 const POSTHOG_KEY: &str = "phc_BKjuzVRSBJ26E49hUin3nKxxN2wX8BeD4pSgixUxpcfF";
@@ -55,7 +54,11 @@ fn compute_panel_position(
 
 /// Build the uv command arguments for running a daemon task.
 /// Returns (program, args, cwd).
-fn build_run_task_command(task_id: &str, uv_bin: &str, daemon_cwd: &str) -> (String, Vec<String>, String) {
+fn build_run_task_command(
+    task_id: &str,
+    uv_bin: &str,
+    daemon_cwd: &str,
+) -> (String, Vec<String>, String) {
     let program = uv_bin.to_string();
     let args = vec![
         "run".to_string(),
@@ -163,8 +166,9 @@ fn get_state() -> Result<Value, String> {
 
 #[tauri::command]
 async fn run_task(task: String) -> Result<(), String> {
-    let uv_bin = std::env::var("MENCBO_UV_BIN")
-        .unwrap_or_else(|_| "/opt/homebrew/bin/uv".to_string());
+    posthog_capture("run_task", serde_json::json!({ "task": task }));
+    let uv_bin =
+        std::env::var("MENCBO_UV_BIN").unwrap_or_else(|_| "/opt/homebrew/bin/uv".to_string());
 
     let daemon_cwd = resolve_daemon_dir()?;
 
@@ -184,6 +188,10 @@ async fn run_task(task: String) -> Result<(), String> {
                     "[mencbo] run_task spawn failed (program={}, task={}): {}",
                     program, task, e
                 );
+                posthog_capture(
+                    "run_task_spawn_failed",
+                    serde_json::json!({ "task": task, "error": e.to_string() }),
+                );
             }
         }
     });
@@ -195,22 +203,36 @@ fn open_logs_dir() -> Result<(), String> {
     // Resolve log directory: MENCBO_LOG_DIR takes priority, fallback to {tempdir}/mencbo
     // (aligned with daemon's _DEFAULT_LOG_DIR in example_tasks.py:16)
     let log_dir = resolve_log_dir();
-    
+
     // create_dir_all is idempotent and only creates if missing.
     // This ensures the directory exists before opening it in Finder.
-    std::fs::create_dir_all(&log_dir).map_err(|e| format!("Failed to create log directory: {}", e))?;
-    
+    if let Err(e) = std::fs::create_dir_all(&log_dir) {
+        let m = format!("Failed to create log directory: {}", e);
+        posthog_capture(
+            "open_logs_failed",
+            serde_json::json!({ "stage": "mkdir", "error": m }),
+        );
+        return Err(m);
+    }
+
     // Open the directory in Finder (macOS)
-    std::process::Command::new("open")
-        .arg(&log_dir)
-        .spawn()
-        .map_err(|e| format!("Failed to open log directory: {}", e))?;
-    
+    if let Err(e) = std::process::Command::new("open").arg(&log_dir).spawn() {
+        let m = format!("Failed to open log directory: {}", e);
+        posthog_capture(
+            "open_logs_failed",
+            serde_json::json!({ "stage": "finder", "error": m }),
+        );
+        return Err(m);
+    }
+
+    posthog_capture("open_logs", serde_json::json!({}));
     Ok(())
 }
 
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
+    // Best-effort: app.exit races the fire-and-forget send, may be lost.
+    posthog_capture("quit", serde_json::json!({ "via": "command" }));
     app.exit(0);
     Ok(())
 }
@@ -222,50 +244,59 @@ enum UpdateOutcome {
     Installed,
 }
 
-async fn check_and_install(handle: &tauri::AppHandle) -> Result<UpdateOutcome, String> {
+/// `source` distinguishes trigger paths in PostHog: "auto" (startup + 6h
+/// timer), "manual" (footer button), "tray" (menu item).
+async fn check_and_install(
+    handle: &tauri::AppHandle,
+    source: &str,
+) -> Result<UpdateOutcome, String> {
+    posthog_capture("updater_check", serde_json::json!({ "source": source }));
     let updater = match handle.updater_builder().build() {
         Ok(u) => u,
         Err(e) => {
             let m = format!("builder error: {e}");
             posthog_capture(
                 "updater_error",
-                serde_json::json!({ "stage": "builder", "detail": m }),
+                serde_json::json!({ "stage": "builder", "detail": m, "source": source }),
             );
             return Err(m);
         }
     };
     let update = match updater.check().await {
         Ok(Some(u)) => u,
-        Ok(None) => return Ok(UpdateOutcome::UpToDate),
+        Ok(None) => {
+            posthog_capture("updater_uptodate", serde_json::json!({ "source": source }));
+            return Ok(UpdateOutcome::UpToDate);
+        }
         Err(e) => {
             let m = format!("check failed: {e}");
             posthog_capture(
                 "updater_error",
-                serde_json::json!({ "stage": "check", "detail": m }),
+                serde_json::json!({ "stage": "check", "detail": m, "source": source }),
             );
             return Err(m);
         }
     };
-    println!(
-        "[updater] {} -> {}",
-        update.current_version, update.version
-    );
+    println!("[updater] {} -> {}", update.current_version, update.version);
     let target = update.version.clone();
     if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
         let m = format!("install failed: {e}");
         posthog_capture(
             "updater_error",
-            serde_json::json!({ "stage": "install", "detail": m }),
+            serde_json::json!({ "stage": "install", "detail": m, "source": source }),
         );
         return Err(m);
     }
-    posthog_capture("updater_installed", serde_json::json!({ "to": target }));
+    posthog_capture(
+        "updater_installed",
+        serde_json::json!({ "to": target, "source": source }),
+    );
     Ok(UpdateOutcome::Installed)
 }
 
 #[tauri::command]
 async fn check_update(app: tauri::AppHandle) -> Result<String, String> {
-    match check_and_install(&app).await? {
+    match check_and_install(&app, "manual").await? {
         UpdateOutcome::UpToDate => Ok("latest".to_string()),
         // If an update installed, restart() never returns — the frontend's
         // invoke dies with the old process, which is expected.
@@ -278,7 +309,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_state, run_task, open_logs_dir, quit_app, check_update])
+        .invoke_handler(tauri::generate_handler![
+            get_state,
+            run_task,
+            open_logs_dir,
+            quit_app,
+            check_update
+        ])
         .setup(|app| {
             // Hide Dock icon (macOS only)
             #[cfg(target_os = "macos")]
@@ -291,11 +328,9 @@ pub fn run() {
                 "rust_launch",
                 serde_json::json!({ "version": app.package_info().version.to_string() }),
             );
-            std::thread::spawn(|| {
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(5 * 60));
-                    posthog_capture("rust_heartbeat", serde_json::json!({}));
-                }
+            std::thread::spawn(|| loop {
+                std::thread::sleep(std::time::Duration::from_secs(5 * 60));
+                posthog_capture("rust_heartbeat", serde_json::json!({}));
             });
 
             // Auto-update: check at startup, then every 6h. Silent download +
@@ -303,11 +338,10 @@ pub fn run() {
             // profile uses panic="abort", so a panic here would kill the tray.
             let update_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let mut ticker =
-                    tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
                 loop {
                     ticker.tick().await; // first tick fires immediately
-                    match check_and_install(&update_handle).await {
+                    match check_and_install(&update_handle, "auto").await {
                         Ok(UpdateOutcome::Installed) => update_handle.restart(),
                         Ok(UpdateOutcome::UpToDate) => {}
                         Err(e) => eprintln!("[updater] {e}"),
@@ -317,8 +351,13 @@ pub fn run() {
 
             // Tray menu: version (disabled) + manual check + quit
             let version = app.package_info().version.to_string();
-            let version_item =
-                MenuItem::with_id(app, "version", format!("MenCbo v{version}"), false, None::<&str>)?;
+            let version_item = MenuItem::with_id(
+                app,
+                "version",
+                format!("MenCbo v{version}"),
+                false,
+                None::<&str>,
+            )?;
             let check_item =
                 MenuItem::with_id(app, "check-update", "检查更新", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
@@ -338,11 +377,17 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        // Best-effort: app.exit races the fire-and-forget send,
+                        // so this event may be lost — acceptable.
+                        posthog_capture("tray_menu", serde_json::json!({ "item": "quit" }));
+                        app.exit(0);
+                    }
                     "check-update" => {
+                        posthog_capture("tray_menu", serde_json::json!({ "item": "check-update" }));
                         let h = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            match check_and_install(&h).await {
+                            match check_and_install(&h, "tray").await {
                                 Ok(UpdateOutcome::Installed) => h.restart(),
                                 Ok(UpdateOutcome::UpToDate) => {
                                     println!("[updater] up to date (manual)")
@@ -370,12 +415,16 @@ pub fn run() {
                         if panel.is_visible().unwrap_or(false) {
                             let _ = panel.hide();
                             let _ = app.emit("panel-event", "hide");
+                            // Native-side interaction proof, independent of the
+                            // webview: during a hang, tray_click keeps flowing
+                            // while $autocapture/panel_open stop → webview hang.
+                            posthog_capture("tray_click", serde_json::json!({ "action": "hide" }));
                             return;
                         }
 
                         // Position panel under tray icon using physical pixel rect
                         let scale = panel.scale_factor().unwrap_or(2.0);
-                        
+
                         // Extract physical pixel values from rect
                         let rect_x = match rect.position {
                             Position::Physical(PhysicalPosition { x, .. }) => x as f64,
@@ -393,20 +442,16 @@ pub fn run() {
                             Size::Physical(PhysicalSize { height, .. }) => height as f64,
                             Size::Logical(logical_size) => logical_size.height * scale,
                         };
-                        
-                        let (x, y) = compute_panel_position(
-                            rect_x,
-                            rect_width,
-                            rect_y,
-                            rect_height,
-                            scale,
-                        );
+
+                        let (x, y) =
+                            compute_panel_position(rect_x, rect_width, rect_y, rect_height, scale);
 
                         // Order: set_position → show → set_focus
                         let _ = panel.set_position(Position::Physical(PhysicalPosition::new(x, y)));
                         let _ = panel.show();
                         let _ = panel.set_focus();
                         let _ = app.emit("panel-event", "show");
+                        posthog_capture("tray_click", serde_json::json!({ "action": "open" }));
                     }
                 })
                 .build(app)?;
@@ -416,6 +461,7 @@ pub fn run() {
             panel.on_window_event(move |e| match e {
                 WindowEvent::Focused(false) => {
                     let _ = panel_for_blur.hide();
+                    posthog_capture("panel_blur_hide", serde_json::json!({}));
                 }
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
@@ -432,7 +478,7 @@ pub fn run() {
             //   from the daemon's atomic write pattern (os.replace).
             let app_handle = app.handle().clone();
             std::thread::spawn(move || {
-                use notify::{Watcher, RecursiveMode, Event, EventKind};
+                use notify::{Event, EventKind, RecursiveMode, Watcher};
 
                 let state_path = resolve_state_path();
 
@@ -450,36 +496,46 @@ pub fn run() {
                 let path_clone = state_path.clone();
                 let file_name = state_path.file_name().map(|n| n.to_os_string());
 
-                let mut watcher = match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
-                    if let Ok(event) = res {
-                        // Only react to events that could affect our target file.
-                        // We watch the parent dir, so we get events for all files
-                        // in it; filter by file name to avoid spurious wakes.
-                        let relevant = match &event.kind {
-                            EventKind::Create(_) | EventKind::Modify(_) => {
-                                // Check if any affected path matches our target filename
-                                if let Some(ref target_name) = file_name {
-                                    event.paths.iter().any(|p| {
-                                        p.file_name().map(|n| n == target_name.as_os_str()).unwrap_or(false)
-                                    })
-                                } else {
-                                    // If we can't determine the target filename, react to all
-                                    true
+                let mut watcher =
+                    match notify::recommended_watcher(move |res: Result<Event, notify::Error>| {
+                        if let Ok(event) = res {
+                            // Only react to events that could affect our target file.
+                            // We watch the parent dir, so we get events for all files
+                            // in it; filter by file name to avoid spurious wakes.
+                            let relevant = match &event.kind {
+                                EventKind::Create(_) | EventKind::Modify(_) => {
+                                    // Check if any affected path matches our target filename
+                                    if let Some(ref target_name) = file_name {
+                                        event.paths.iter().any(|p| {
+                                            p.file_name()
+                                                .map(|n| n == target_name.as_os_str())
+                                                .unwrap_or(false)
+                                        })
+                                    } else {
+                                        // If we can't determine the target filename, react to all
+                                        true
+                                    }
                                 }
-                            }
-                            _ => false,
-                        };
+                                _ => false,
+                            };
 
-                        if relevant {
-                            // Use the shared transform helper — same shape as get_state
-                            let payload = read_and_transform_state(&path_clone);
-                            let _ = handle.emit("state-changed", payload);
+                            if relevant {
+                                // Use the shared transform helper — same shape as get_state
+                                let payload = read_and_transform_state(&path_clone);
+                                posthog_capture(
+                                    "state_changed",
+                                    serde_json::json!({
+                                        "tasks": payload["tasks"].as_array().map(|a| a.len()),
+                                        "mock": payload["mock"].as_bool().unwrap_or(false),
+                                    }),
+                                );
+                                let _ = handle.emit("state-changed", payload);
+                            }
                         }
-                    }
-                }) {
-                    Ok(w) => w,
-                    Err(_) => return,
-                };
+                    }) {
+                        Ok(w) => w,
+                        Err(_) => return,
+                    };
 
                 // FIX (M1 scrutiny round-2): Ensure the watch directory exists
                 // before mounting the watcher. On a pristine machine where
@@ -568,19 +624,29 @@ mod tests {
             "/home/user/mencbo/apps/desktop/daemon",
         );
         assert_eq!(program, "/opt/homebrew/bin/uv");
-        assert_eq!(args, vec!["run", "python", "-m", "mencbo", "run-task", "example:heartbeat"]);
+        assert_eq!(
+            args,
+            vec![
+                "run",
+                "python",
+                "-m",
+                "mencbo",
+                "run-task",
+                "example:heartbeat"
+            ]
+        );
         assert_eq!(cwd, "/home/user/mencbo/apps/desktop/daemon");
     }
 
     #[test]
     fn build_run_task_custom_uv() {
-        let (program, args, _) = build_run_task_command(
-            "test:task",
-            "/custom/bin/uv",
-            "/some/path",
-        );
+        let (program, args, _) =
+            build_run_task_command("test:task", "/custom/bin/uv", "/some/path");
         assert_eq!(program, "/custom/bin/uv");
-        assert_eq!(args, vec!["run", "python", "-m", "mencbo", "run-task", "test:task"]);
+        assert_eq!(
+            args,
+            vec!["run", "python", "-m", "mencbo", "run-task", "test:task"]
+        );
     }
 
     // ---- Serial env-mutating tests (use ENV_MUTEX) ----
@@ -648,7 +714,10 @@ mod tests {
 
         // Helper to find a task by id
         let find_task = |id: &str| -> &Value {
-            tasks.iter().find(|t| t["id"] == id).expect("task not found")
+            tasks
+                .iter()
+                .find(|t| t["id"] == id)
+                .expect("task not found")
         };
 
         // Success task: error is null, duration_ms=12→durationMs=12
@@ -658,7 +727,10 @@ mod tests {
         assert_eq!(heartbeat["lastRun"], "2026-09-07T01:30:00+00:00");
         assert_eq!(heartbeat["status"], "success");
         assert_eq!(heartbeat["durationMs"], 12);
-        assert!(heartbeat["error"].is_null(), "success task error must be null");
+        assert!(
+            heartbeat["error"].is_null(),
+            "success task error must be null"
+        );
 
         // Failed task: error is non-null string, duration_ms present
         let failure = find_task("example:failure-demo");
@@ -667,7 +739,10 @@ mod tests {
         assert_eq!(failure["lastRun"], "2026-09-07T00:50:00+00:00");
         assert_eq!(failure["status"], "failed");
         assert_eq!(failure["durationMs"], 1234);
-        assert!(failure["error"].is_string(), "failed task error must be non-null string");
+        assert!(
+            failure["error"].is_string(),
+            "failed task error must be non-null string"
+        );
         assert_eq!(failure["error"], "RuntimeError('演示失败')");
 
         // Running task: duration_ms=null→durationMs=null, error=null
@@ -675,14 +750,29 @@ mod tests {
         assert_eq!(maintenance["id"], "example:maintenance");
         assert_eq!(maintenance["name"], "示例·维护日志");
         assert_eq!(maintenance["status"], "running");
-        assert!(maintenance["durationMs"].is_null(), "running task durationMs must be null");
-        assert!(maintenance["error"].is_null(), "running task error must be null");
+        assert!(
+            maintenance["durationMs"].is_null(),
+            "running task durationMs must be null"
+        );
+        assert!(
+            maintenance["error"].is_null(),
+            "running task error must be null"
+        );
 
         // No snake_case keys should leak through (transformation check)
         for task in tasks {
-            assert!(task.get("display_name").is_none(), "display_name should be renamed to name");
-            assert!(task.get("last_run").is_none(), "last_run should be renamed to lastRun");
-            assert!(task.get("duration_ms").is_none(), "duration_ms should be renamed to durationMs");
+            assert!(
+                task.get("display_name").is_none(),
+                "display_name should be renamed to name"
+            );
+            assert!(
+                task.get("last_run").is_none(),
+                "last_run should be renamed to lastRun"
+            );
+            assert!(
+                task.get("duration_ms").is_none(),
+                "duration_ms should be renamed to durationMs"
+            );
         }
 
         // Cleanup
@@ -697,13 +787,13 @@ mod tests {
         // VAL-STATE-002: Missing file returns mock marker
         let nonexistent = std::env::temp_dir().join("mencbo_test_nonexistent_v2_99999/state.json");
         std::env::set_var("MENCBO_STATE_PATH", &nonexistent);
-        
+
         let result = get_state().unwrap();
-        
+
         assert_eq!(result["mock"], true);
         assert!(result.get("tasks").unwrap().is_array());
         assert_eq!(result["tasks"].as_array().unwrap().len(), 0);
-        
+
         std::env::remove_var("MENCBO_STATE_PATH");
     }
 
@@ -716,15 +806,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
         let state_path = temp_dir.join("state.json");
-        
+
         std::fs::write(&state_path, "{ invalid json }}}").unwrap();
         std::env::set_var("MENCBO_STATE_PATH", &state_path);
-        
+
         let result = get_state().unwrap();
-        
+
         assert_eq!(result["mock"], true);
         assert!(result.get("tasks").unwrap().is_array());
-        
+
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::env::remove_var("MENCBO_STATE_PATH");
     }
@@ -738,15 +828,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
         let state_path = temp_dir.join("state.json");
-        
+
         // Simulate atomic write in progress
         std::fs::write(&state_path, r#"{"updated_at": "2026-09-07"#).unwrap();
         std::env::set_var("MENCBO_STATE_PATH", &state_path);
-        
+
         let result = get_state().unwrap();
-        
+
         assert_eq!(result["mock"], true);
-        
+
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::env::remove_var("MENCBO_STATE_PATH");
     }
@@ -760,23 +850,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
         let env_path = temp_dir.join("env_state.json");
-        
+
         let env_json = r#"{
             "updated_at": "2026-09-07T02:00:00+00:00",
             "project_id": "test/env-priority",
             "health": "degraded",
             "tasks": {}
         }"#;
-        
+
         std::fs::write(&env_path, env_json).unwrap();
         std::env::set_var("MENCBO_STATE_PATH", &env_path);
-        
+
         let result = get_state().unwrap();
-        
+
         // Should read from env path, not default ~/.mencbo/state.json
         assert_eq!(result["project_id"], "test/env-priority");
         assert_eq!(result["health"], "degraded");
-        
+
         let _ = std::fs::remove_dir_all(&temp_dir);
         std::env::remove_var("MENCBO_STATE_PATH");
     }
@@ -854,13 +944,16 @@ mod tests {
         let daemon_cwd = resolve_daemon_dir().unwrap();
         assert_eq!(daemon_cwd, custom_dir);
 
-        let uv_bin = std::env::var("MENCBO_UV_BIN")
-            .unwrap_or_else(|_| "/opt/homebrew/bin/uv".to_string());
+        let uv_bin =
+            std::env::var("MENCBO_UV_BIN").unwrap_or_else(|_| "/opt/homebrew/bin/uv".to_string());
 
         let (program, args, cwd) = build_run_task_command("test:task", &uv_bin, &daemon_cwd);
         assert_eq!(program, "/custom/uv");
         assert_eq!(cwd, "/custom/daemon/path");
-        assert_eq!(args, vec!["run", "python", "-m", "mencbo", "run-task", "test:task"]);
+        assert_eq!(
+            args,
+            vec!["run", "python", "-m", "mencbo", "run-task", "test:task"]
+        );
 
         std::env::remove_var("MENCBO_DAEMON_DIR");
         std::env::remove_var("MENCBO_UV_BIN");
@@ -875,7 +968,10 @@ mod tests {
 
         let daemon_cwd = resolve_daemon_dir().unwrap();
         let home = std::env::var("HOME").unwrap();
-        assert_eq!(daemon_cwd, format!("{home}/mencbo/mencbo/apps/desktop/daemon"));
+        assert_eq!(
+            daemon_cwd,
+            format!("{home}/mencbo/mencbo/apps/desktop/daemon")
+        );
     }
 
     #[test]
@@ -899,10 +995,10 @@ mod tests {
         // When MENCBO_LOG_DIR is not set, should return {tempdir}/mencbo
         // This aligns with daemon's _DEFAULT_LOG_DIR
         let _lock = ENV_MUTEX.lock().unwrap();
-        
+
         // Remove the env var to test default behavior
         std::env::remove_var("MENCBO_LOG_DIR");
-        
+
         let result = resolve_log_dir();
         let expected = std::env::temp_dir().join("mencbo");
         assert_eq!(result, expected);
@@ -912,13 +1008,13 @@ mod tests {
     fn resolve_log_dir_env_override() {
         // When MENCBO_LOG_DIR is set, it should take priority
         let _lock = ENV_MUTEX.lock().unwrap();
-        
+
         let custom_path = std::env::temp_dir().join("custom_logs_test");
         std::env::set_var("MENCBO_LOG_DIR", &custom_path);
-        
+
         let result = resolve_log_dir();
         assert_eq!(result, custom_path);
-        
+
         std::env::remove_var("MENCBO_LOG_DIR");
     }
 
@@ -959,11 +1055,11 @@ mod tests {
 
         // Should not panic and should only include the valid task
         let result = get_state().unwrap();
-        
+
         // Verify we got the valid task
         let tasks = result["tasks"].as_array().unwrap();
         assert_eq!(tasks.len(), 1, "Should only contain the valid task");
-        
+
         let valid_task = &tasks[0];
         assert_eq!(valid_task["id"], "valid:task");
         assert_eq!(valid_task["name"], "Valid Task");
