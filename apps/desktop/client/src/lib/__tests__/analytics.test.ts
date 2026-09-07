@@ -332,4 +332,58 @@ describe("analytics identity injection", () => {
       })
     );
   });
+
+  it("deduplicates events within 10ms window", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const mockInvoke = vi.mocked(invoke);
+    mockInvoke.mockResolvedValue({
+      installId: "desktop-test-uuid-1234",
+      sessionId: "session-5678",
+    });
+
+    const { initAnalytics, capture } = await import("../analytics");
+    await initAnalytics();
+
+    // Clear previous calls
+    vi.mocked(posthog.capture).mockClear();
+
+    // Capture same event twice in quick succession
+    capture("state_load", { tasks: 5 });
+    capture("state_load", { tasks: 5 });
+
+    // Should only capture once (deduplication)
+    const captureCalls = vi.mocked(posthog.capture).mock.calls;
+    expect(captureCalls.length).toBe(1);
+    expect(captureCalls[0][0]).toBe("state_load");
+  });
+
+  it("allows same event after 10ms", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const mockInvoke = vi.mocked(invoke);
+    mockInvoke.mockResolvedValue({
+      installId: "desktop-test-uuid-1234",
+      sessionId: "session-5678",
+    });
+
+    const { initAnalytics, capture } = await import("../analytics");
+    await initAnalytics();
+
+    // Clear previous calls
+    vi.mocked(posthog.capture).mockClear();
+
+    // Capture same event
+    capture("state_load", { tasks: 5 });
+
+    // Wait 15ms
+    await new Promise((resolve) => setTimeout(resolve, 15));
+
+    // Capture same event again
+    capture("state_load", { tasks: 5 });
+
+    // Should capture twice (outside dedup window)
+    const captureCalls = vi.mocked(posthog.capture).mock.calls;
+    expect(captureCalls.length).toBe(2);
+    expect(captureCalls[0][0]).toBe("state_load");
+    expect(captureCalls[1][0]).toBe("state_load");
+  });
 });

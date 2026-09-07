@@ -103,8 +103,15 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 
 | Event | Layer | Trigger | Properties |
 |-------|-------|---------|------------|
-| `panel_open` | both | Panel shown | `via: tray` |
-| `panel_close` | both | Panel hidden | `via: tray\|blur` |
+| `panel_open` | both | Panel shown | `via: tray`, `panel_id: session_id` |
+| `panel_close` | both | Panel hidden | `via: tray\|blur\|close`, `panel_id: session_id` |
+
+**Panel event paths**:
+- `tray`: User clicks tray icon to toggle panel visibility
+- `blur`: Panel loses focus (WindowEvent::Focused(false))
+- `close`: Window close request (WindowEvent::CloseRequested, prevented and hidden instead)
+
+All panel events include `panel_id` (derived from session_id) for correlation across open/close pairs.
 
 ### State Management
 

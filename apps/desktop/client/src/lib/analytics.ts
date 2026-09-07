@@ -15,6 +15,10 @@ let identityDegraded = false; // fix-sentinel-degraded-flag: true when install_i
 // and flushed in order once register() completes (fixes session_id race).
 const eventBuffer: Array<{ event: string; props?: Record<string, unknown> }> = [];
 
+// Deduplication guard: prevents same event from firing twice within 1ms
+// Fixes state_load double-fire issue observed in production
+const recentCaptures = new Map<string, number>();
+
 /**
  * Initialize PostHog analytics with unified identity from Rust.
  *
@@ -30,6 +34,20 @@ const eventBuffer: Array<{ event: string; props?: Record<string, unknown> }> = [
  * This ensures the failure path is always visible in PostHog — an architectural
  * invariant (see p0-identity-unification round 3 diagnosis).
  */
+/**
+ * Deduplication: skip if same event captured within 10ms
+ * Fixes js_state_loaded (now state_load) double-fire issue
+ */
+function shouldSkipDuplicate(event: string): boolean {
+  const now = Date.now();
+  const lastTime = recentCaptures.get(event);
+  if (lastTime !== undefined && now - lastTime < 10) {
+    return true;
+  }
+  recentCaptures.set(event, now);
+  return false;
+}
+
 export async function initAnalytics() {
   // JS-side debug gate (VAL-ENV-001: dev 构建零上报)
   if (import.meta.env.DEV) {
@@ -189,6 +207,11 @@ export async function initAnalytics() {
 
 export function capture(event: string, props?: Record<string, unknown>) {
   try {
+    // Check for duplicate events (fixes state_load double-fire)
+    if (shouldSkipDuplicate(event)) {
+      return;
+    }
+
     if (!analyticsReady) {
       // Buffer event until identity is ready (fixes session_id race)
       eventBuffer.push({ event, props });

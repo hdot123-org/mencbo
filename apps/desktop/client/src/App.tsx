@@ -29,24 +29,6 @@ function App() {
     return unsubscribe;
   }, []);
 
-  // Behavioral breadcrumbs from the Rust side (panel show/hide)
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    import("@tauri-apps/api/event")
-      .then(({ listen }) =>
-        listen<string>("panel-event", (e) => {
-          capture(e.payload === "show" ? "panel_open" : "panel_close");
-        }),
-      )
-      .then((u) => {
-        unlisten = u;
-      })
-      .catch(() => {
-        /* browser mock mode */
-      });
-    return () => unlisten?.();
-  }, []);
-
   if (!state) {
     return <div className="h-screen w-screen bg-neutral-900" />;
   }

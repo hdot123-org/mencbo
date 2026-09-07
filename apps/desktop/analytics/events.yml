@@ -68,13 +68,15 @@ events:
     status: active
     props:
       via: string  # tray
+      panel_id: string  # Unique panel instance ID (session_id)
     description: Panel shown
 
   panel_close:
     layer: both
     status: active
     props:
-      via: string  # tray | blur
+      via: string  # tray | blur | close
+      panel_id: string  # Unique panel instance ID (session_id)
     description: Panel hidden
 
   # === State Management ===
