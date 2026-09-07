@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MenCbo",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "identifier": "com.mencbo.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -44,6 +44,16 @@
     ],
     "macOS": {
       "minimumSystemVersion": "10.15"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IENFQjg4RTVEQjkwMEZDQzQKUldURS9BQzVYWTY0enZGdGRxaytMdHArcWlqRFJaN3J1RWdwZG1qbXFxWVRyVnlhNXp1T3E5N0oK",
+      "endpoints": [
+        "https://github.com/hdot123-org/mencbo/releases/latest/download/latest.json"
+      ]
     }
   }
 }

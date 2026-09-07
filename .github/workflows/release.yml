@@ -109,11 +109,39 @@ jobs:
             "dmg/MenCbo_${VERSION#v}_aarch64.dmg"
           ls -lh dmg/
 
-      - name: Upload DMG artifact
+      - name: Build and sign updater archive
+        # Updater packages must embed the RE-SIGNED app (tauri's own artifact
+        # would carry the broken pre-fix signature), so repack from the fixed
+        # bundle, minisign it, and emit latest.json for the updater endpoint.
+        working-directory: apps/desktop/client
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          B=src-tauri/target/release/bundle
+          rm -f "$B/macos/MenCbo.app.tar.gz" "$B/macos/MenCbo.app.tar.gz.sig"
+          tar -czf "$B/macos/MenCbo.app.tar.gz" -C "$B/macos" MenCbo.app
+          pnpm tauri signer sign -k "$TAURI_SIGNING_PRIVATE_KEY" \
+            --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
+            "$B/macos/MenCbo.app.tar.gz"
+          SIG=$(cat "$B/macos/MenCbo.app.tar.gz.sig")
+          jq -n --arg v "${VERSION#v}" --arg sig "$SIG" \
+            --arg url "https://github.com/hdot123-org/mencbo/releases/download/${VERSION}/MenCbo.app.tar.gz" \
+            '{version: $v, pub_date: (now | todate),
+              platforms: {"darwin-aarch64": {signature: $sig, url: $url}}}' \
+            > "$B/latest.json"
+          cat "$B/latest.json"
+
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mencbo-macos-dmg
-          path: apps/desktop/client/src-tauri/target/release/bundle/dmg/*.dmg
+          path: |
+            apps/desktop/client/src-tauri/target/release/bundle/dmg/*.dmg
+            apps/desktop/client/src-tauri/target/release/bundle/macos/MenCbo.app.tar.gz
+            apps/desktop/client/src-tauri/target/release/bundle/macos/MenCbo.app.tar.gz.sig
+            apps/desktop/client/src-tauri/target/release/bundle/latest.json
           if-no-files-found: error
 
   github-release:
@@ -138,9 +166,9 @@ jobs:
           if gh release view "${GITHUB_REF_NAME}" > /dev/null 2>&1; then
             echo "Release ${GITHUB_REF_NAME} already exists, updating"
             gh release edit "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --latest
-            gh release upload "${GITHUB_REF_NAME}" dist-dmg/*.dmg --clobber
+            gh release upload "${GITHUB_REF_NAME}" dist-dmg/* --clobber
           else
-            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes dist-dmg/*.dmg
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes dist-dmg/*
           fi
 
   npm-publish:

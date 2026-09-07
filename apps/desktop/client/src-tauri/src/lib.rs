@@ -4,6 +4,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     WindowEvent, Emitter,
 };
+use tauri_plugin_updater::UpdaterExt;
 use serde_json::Value;
 
 const PANEL_W: f64 = 360.0;
@@ -190,11 +191,50 @@ fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![get_state, run_task, open_logs_dir, quit_app])
         .setup(|app| {
             // Hide Dock icon (macOS only)
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            // Auto-update: check at startup, then every 6h. Silent download +
+            // install + relaunch. Defensive error handling only — release
+            // profile uses panic="abort", so a panic here would kill the tray.
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut ticker =
+                    tokio::time::interval(std::time::Duration::from_secs(6 * 60 * 60));
+                loop {
+                    ticker.tick().await; // first tick fires immediately
+                    let updater = match update_handle.updater_builder().build() {
+                        Ok(u) => u,
+                        Err(e) => {
+                            eprintln!("[updater] builder error: {e}");
+                            continue;
+                        }
+                    };
+                    let update = match updater.check().await {
+                        Ok(Some(u)) => u,
+                        Ok(None) => continue, // up to date
+                        Err(e) => {
+                            eprintln!("[updater] check failed: {e}");
+                            continue;
+                        }
+                    };
+                    println!(
+                        "[updater] {} -> {}",
+                        update.current_version, update.version
+                    );
+                    if let Err(e) =
+                        update.download_and_install(|_, _| {}, || {}).await
+                    {
+                        eprintln!("[updater] install failed: {e}");
+                        continue;
+                    }
+                    update_handle.restart(); // never returns
+                }
+            });
 
             // Tray menu with quit item
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
