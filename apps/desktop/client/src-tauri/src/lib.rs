@@ -236,9 +236,12 @@ pub fn run() {
                 }
             });
 
-            // Tray menu with quit item
+            // Tray menu: disabled version item on top + quit
+            let version = app.package_info().version.to_string();
+            let version_item =
+                MenuItem::with_id(app, "version", format!("MenCbo v{version}"), false, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&quit])?;
+            let menu = Menu::with_items(app, &[&version_item, &quit])?;
 
             let panel = app.get_webview_window("panel").expect("panel window");
 
