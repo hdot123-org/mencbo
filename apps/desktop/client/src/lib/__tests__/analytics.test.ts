@@ -100,7 +100,7 @@ describe("analytics identity injection", () => {
     expect(options.bootstrap.isIdentifiedID).toBe(true);
   });
 
-  it("handles identity fetch failure gracefully", async () => {
+  it("handles identity fetch failure gracefully with fallback", async () => {
     const { invoke } = await import("@tauri-apps/api/core");
     const mockInvoke = vi.mocked(invoke);
     mockInvoke.mockRejectedValue(new Error("Identity not available"));
@@ -108,8 +108,40 @@ describe("analytics identity injection", () => {
     const { initAnalytics } = await import("../analytics");
     await initAnalytics();
 
-    // Should not initialize posthog if identity fetch fails
-    expect(posthog.init).not.toHaveBeenCalled();
-    expect(posthog.capture).not.toHaveBeenCalled();
+    // NEW BEHAVIOR: When identity fails, we fall back to basic init (no bootstrap)
+    // This ensures the failure path is observable in PostHog
+    expect(posthog.init).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        api_host: "https://us.i.posthog.com",
+        autocapture: true,
+        capture_pageview: false,
+        persistence: "memory",
+      })
+    );
+
+    // Verify the fallback init was called WITHOUT bootstrap
+    const initCalls = vi.mocked(posthog.init).mock.calls;
+    expect(initCalls.length).toBe(1);
+    const initOptions = initCalls[0][1] as any;
+    expect(initOptions.bootstrap).toBeUndefined();
+
+    // Verify diagnostic event was captured with the failure reason
+    expect(posthog.capture).toHaveBeenCalledWith(
+      "diag_identity_failed",
+      expect.objectContaining({
+        app: "mencbo-desktop",
+        reason: expect.stringContaining("invoke_failed"),
+      })
+    );
+
+    // js_launch should still be captured (analytics is observable even on failure)
+    expect(posthog.capture).toHaveBeenCalledWith(
+      "js_launch",
+      expect.objectContaining({ app: "mencbo-desktop" })
+    );
+
+    // register should NOT be called when identity fails (no session_id to register)
+    expect(posthog.register).not.toHaveBeenCalled();
   });
 });
