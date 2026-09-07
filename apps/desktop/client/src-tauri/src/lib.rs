@@ -52,6 +52,12 @@ fn posthog_capture(event: &str, mut props: serde_json::Value) {
         .cloned()
         .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
 
+    // No-op if identity initialization failed (graceful degradation, fix-m1-review-findings)
+    // "Analytics never kills the host" invariant
+    if install_id == "analytics-disabled" {
+        return;
+    }
+
     // Inject baseline properties into every event (VAL-ENV-002/003)
     if let Some(obj) = props.as_object_mut() {
         obj.insert("session_id".to_string(), serde_json::Value::String(session_id));
@@ -221,6 +227,10 @@ fn get_state() -> Result<Value, String> {
 /// Return the analytics identity (install_id + session_id) for JS-side bootstrap.
 /// This is the bridge command that the webview invokes to get the persistent
 /// install_id and the per-launch session_id from the Rust authority.
+///
+/// Also returns platform/arch from std::env::consts so the JS side uses the
+/// same values as Rust (fix-m1-review-findings: navigator.userAgent parsing
+/// is unreliable on Apple Silicon — it reports x86_64 under Rosetta).
 #[tauri::command]
 fn analytics_identity() -> Result<Value, String> {
     let (install_id, session_id) = IDENTITY
@@ -229,6 +239,8 @@ fn analytics_identity() -> Result<Value, String> {
     Ok(serde_json::json!({
         "installId": install_id,
         "sessionId": session_id,
+        "platform": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
     }))
 }
 
@@ -404,13 +416,26 @@ pub fn run() {
                 .set(app_version.clone())
                 .expect("APP_VERSION already initialized");
 
-            // Initialize identity before any analytics events
-            let app_data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
-            let install_id = get_or_create_install_id(&app_data_dir).expect("Failed to get install_id");
-            let session_id = generate_launch_id();
-            IDENTITY
-                .set((install_id.clone(), session_id.clone()))
-                .expect("Identity already initialized");
+            // Initialize identity before any analytics events.
+            // FIX (fix-m1-review-findings): graceful degradation instead of .expect.
+            // "Analytics never kills the host" invariant — if install_id IO fails,
+            // disable capture entirely and log the error locally.
+            let identity_ok = (|| -> Result<(), String> {
+                let app_data_dir = app.path().app_data_dir()
+                    .map_err(|e| format!("cannot get app_data_dir: {}", e))?;
+                let install_id = get_or_create_install_id(&app_data_dir)?;
+                let session_id = generate_launch_id();
+                IDENTITY.set((install_id, session_id))
+                    .map_err(|_| "Identity already initialized".to_string())?;
+                Ok(())
+            })();
+
+            if let Err(e) = identity_ok {
+                eprintln!("[mencbo] analytics disabled: {}", e);
+                // Set sentinel values so IDENTITY.get() returns Some but posthog_capture
+                // detects the sentinel and becomes no-op (see posthog_capture function).
+                let _ = IDENTITY.set(("analytics-disabled".to_string(), "analytics-disabled".to_string()));
+            }
 
             // Rust-side observability, independent of the webview: launch
             // marker + 5-min heartbeat. If rust_heartbeat keeps flowing while
@@ -671,6 +696,9 @@ pub fn run() {
 /// 
 /// Supported values: freeze_webview, block_main, slow_ipc, panic
 /// Only active in release builds (debug builds are gated by cfg!(debug_assertions)).
+/// 
+/// Feature attribution: fix-m1-review-findings (m1 scrutiny round 1 quality debt)
+/// Will be consumed by: watchdog-diagnostics (M4)
 #[allow(dead_code)]
 fn check_diag_test_hook() {
     // Only active in release builds
@@ -1219,14 +1247,5 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(conf).unwrap();
         assert_eq!(json["identifier"], "com.mencbo.desktop.dev");
         assert_ne!(json["identifier"], "com.mencbo.desktop");
-    }
-
-    #[test]
-    fn single_instance_plugin_compiles() {
-        // This test verifies that the tauri-plugin-single-instance dependency
-        // is correctly configured and the plugin can be registered.
-        // The actual runtime behavior (second instance focusing existing window)
-        // is validated via release build integration testing.
-        assert!(true, "Plugin registration compiles successfully");
     }
 }

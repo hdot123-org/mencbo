@@ -39,6 +39,8 @@ describe("analytics identity injection", () => {
     mockInvoke.mockResolvedValue({
       installId: "desktop-test-uuid-1234",
       sessionId: "session-5678",
+      platform: "darwin",
+      arch: "aarch64",
     });
 
     const { initAnalytics } = await import("../analytics");
@@ -79,6 +81,8 @@ describe("analytics identity injection", () => {
     mockInvoke.mockResolvedValue({
       installId: "desktop-test-uuid-1234",
       sessionId: "session-5678",
+      platform: "darwin",
+      arch: "aarch64",
     });
 
     const { initAnalytics } = await import("../analytics");
@@ -90,8 +94,8 @@ describe("analytics identity injection", () => {
         source: "webview",
         environment: "production",
         app_version: expect.any(String),
-        platform: expect.any(String),
-        arch: expect.any(String),
+        platform: "darwin",
+        arch: "aarch64",
       })
     );
   });
@@ -155,7 +159,17 @@ describe("analytics identity injection", () => {
       expect.objectContaining({ app: "mencbo-desktop" })
     );
 
-    // register should NOT be called when identity fails (no session_id to register)
-    expect(posthog.register).not.toHaveBeenCalled();
+    // NEW BEHAVIOR: register should be called even when identity fails
+    // This ensures baseline properties are present on all events (Fix 2)
+    expect(posthog.register).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session_id: "missing",
+        source: "webview",
+        environment: "production",
+        app_version: expect.any(String),
+        platform: expect.any(String),
+        arch: expect.any(String),
+      })
+    );
   });
 });
