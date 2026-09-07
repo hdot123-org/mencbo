@@ -1,3 +1,5 @@
+// Validation comment (VAL-CI-002): engine-only change to verify Desktop workflow path filter skips Client/Tauri jobs. No behavior change.
+
 export { MemoryEngine } from './engine.js'
 export type { EngineOptions, ListOptions, MutationOptions, ReadOptions, WriteOptions } from './engine.js'
 
