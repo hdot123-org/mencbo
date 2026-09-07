@@ -207,7 +207,10 @@ pub fn run() {
             // create a second NSStatusItem alongside this builder (dual tray bug).
             TrayIconBuilder::with_id("main")
                 .icon(app.default_window_icon().unwrap().clone())
-                .icon_as_template(true)
+                // Brand logo has an opaque light-gray background — template mode
+                // (alpha-only monochrome) would render as a solid block in the
+                // menu bar. Use the full-color icon instead.
+                .icon_as_template(false)
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
