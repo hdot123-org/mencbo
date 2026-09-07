@@ -157,6 +157,9 @@ jobs:
         with:
           name: mencbo-macos-dmg
           path: dist-dmg
+          # artifact preserves the multi-dir upload layout; flatten so that
+          # dist-dmg/* globs only files (gh release upload rejects dirs)
+          merge-multiple: true
 
       - name: Create or update release with auto-generated notes
         env:
