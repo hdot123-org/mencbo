@@ -1,0 +1,291 @@
+# MenCbo Desktop PostHog Event Registry
+# Single source of truth for all analytics events
+# Standard: posthog-desktop-monitoring-standard-v1.1
+
+schema_version: "1.0"
+
+posthog:
+  project_id: 597439
+  host: us.posthog.com
+  project_name: MenCbo Desktop
+
+# Code generators that consume this registry
+generators:
+  typescript: apps/desktop/client/src/lib/analytics-events.gen.ts
+  rust: apps/desktop/client/src-tauri/src/analytics_events.rs
+
+# Event definitions
+# layer: rust | webview | both
+# status: active | deprecated
+events:
+  # === Lifecycle Events ===
+  rust_launch:
+    layer: rust
+    status: active
+    props:
+      version: string
+    description: Process startup
+
+  rust_exit:
+    layer: rust
+    status: active
+    props:
+      via: string  # command | tray_menu
+    description: Process exit (best-effort, may be lost)
+
+  rust_heartbeat:
+    layer: rust
+    status: active
+    props: {}
+    description: 5-minute heartbeat from Rust layer
+
+  js_launch:
+    layer: webview
+    status: active
+    props: {}
+    description: Webview initialization
+
+  js_heartbeat:
+    layer: webview
+    status: active
+    props:
+      uptime_sec: number
+    description: 5-minute heartbeat from webview layer
+
+  # === Panel Events ===
+  panel_open:
+    layer: both
+    status: active
+    props:
+      via: string  # tray
+    description: Panel shown
+
+  panel_close:
+    layer: both
+    status: active
+    props:
+      via: string  # tray | blur
+    description: Panel hidden
+
+  # === State Management ===
+  state_load:
+    layer: webview
+    status: active
+    props:
+      tasks: number
+      duration_ms: number
+    description: Initial state loaded successfully
+
+  diag_state_load_failed:
+    layer: webview
+    status: active
+    props:
+      reason: string
+    description: Initial state load failed
+
+  state_sync:
+    layer: both
+    status: active
+    props:
+      tasks: number
+      mock: boolean
+    description: State file changed and synced
+
+  # === Task Execution ===
+  task_run:
+    layer: rust
+    status: active
+    props:
+      task: string
+    description: Task execution invoked
+
+  diag_task_spawn_failed:
+    layer: rust
+    status: active
+    props:
+      task: string
+      error: string
+    description: Failed to spawn task process
+
+  # === Logging ===
+  logs_open:
+    layer: rust
+    status: active
+    props: {}
+    description: Log directory opened successfully
+
+  diag_logs_open_failed:
+    layer: rust
+    status: active
+    props:
+      stage: string  # mkdir | finder
+      error: string
+    description: Failed to open log directory
+
+  # === Auto-Update ===
+  app_update_check:
+    layer: rust
+    status: active
+    props:
+      source: string  # auto | manual | tray
+    description: Update check initiated
+
+  app_update_checked:
+    layer: rust
+    status: active
+    props:
+      result: string  # uptodate
+      source: string
+    description: Update check completed (no update available)
+
+  app_update_failed:
+    layer: rust
+    status: active
+    props:
+      stage: string  # builder | check | install
+      detail: string
+      source: string
+    description: Update process failed
+
+  app_update_installed:
+    layer: rust
+    status: active
+    props:
+      to: string
+      source: string
+    description: Update installed successfully
+
+  # === Error Events ===
+  js_error:
+    layer: webview
+    status: active
+    props:
+      message: string
+    description: Frontend error caught
+
+  js_unhandled_rejection:
+    layer: webview
+    status: active
+    props:
+      reason: string
+    description: Unhandled promise rejection
+
+  diag_identity_failed:
+    layer: webview
+    status: active
+    props:
+      reason: string
+    description: Identity bootstrap failed (invoke or init failure)
+
+  # === Deprecated Events (old names) ===
+  quit:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: rust_exit
+    description: Renamed to rust_exit
+
+  tray_menu:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: rust_exit  # when item:quit
+    description: Removed (redundant with rust_exit + app_update_check)
+
+  tray_click:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: panel_open | panel_close
+    description: Split into panel_open/panel_close with via:tray
+
+  run_task:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: task_run
+    description: Renamed to task_run ([module]_[action] format)
+
+  run_task_spawn_failed:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: diag_task_spawn_failed
+    description: Renamed to diag_task_spawn_failed (diag_ prefix)
+
+  open_logs:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: logs_open
+    description: Renamed to logs_open ([module]_[action] format)
+
+  open_logs_failed:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: diag_logs_open_failed
+    description: Renamed to diag_logs_open_failed (diag_ prefix)
+
+  updater_check:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: app_update_check
+    description: Renamed to app_update_check
+
+  updater_error:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: app_update_failed
+    description: Renamed to app_update_failed
+
+  updater_uptodate:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: app_update_checked
+    description: Renamed to app_update_checked with result:uptodate
+
+  updater_installed:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: app_update_installed
+    description: Renamed to app_update_installed
+
+  state_changed:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: state_sync
+    description: Renamed to state_sync
+
+  js_state_loaded:
+    layer: webview
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: state_load
+    description: Renamed to state_load ([module]_[action] format)
+
+  js_state_updated:
+    layer: webview
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: state_sync
+    description: Renamed to state_sync (aligns with Rust side)
+
+  state_load_failed:
+    layer: webview
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: diag_state_load_failed
+    description: Renamed to diag_state_load_failed (diag_ prefix)
+
+  panel_blur_hide:
+    layer: rust
+    status: deprecated
+    deprecated_since: "2026-09-07"
+    replaced_by: panel_close
+    description: Merged into panel_close with via:blur
