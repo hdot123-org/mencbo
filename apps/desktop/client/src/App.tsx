@@ -14,15 +14,15 @@ function App() {
     loadState()
       .then((s) => {
         setState(s);
-        capture("js_state_loaded", {
+        capture("state_load", {
           tasks: Array.isArray(s.tasks) ? s.tasks.length : 0,
           duration_ms: Math.round(performance.now() - t0),
         });
       })
-      .catch((e) => capture("state_load_failed", { reason: String(e).slice(0, 200) }));
+      .catch((e) => capture("diag_state_load_failed", { reason: String(e).slice(0, 200) }));
     const unsubscribe = subscribeState((s) => {
       setState(s);
-      capture("js_state_updated", {
+      capture("state_sync", {
         tasks: Array.isArray(s.tasks) ? s.tasks.length : 0,
       });
     });

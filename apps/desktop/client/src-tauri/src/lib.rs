@@ -166,7 +166,7 @@ fn get_state() -> Result<Value, String> {
 
 #[tauri::command]
 async fn run_task(task: String) -> Result<(), String> {
-    posthog_capture("run_task", serde_json::json!({ "task": task }));
+    posthog_capture("task_run", serde_json::json!({ "task": task }));
     let uv_bin =
         std::env::var("MENCBO_UV_BIN").unwrap_or_else(|_| "/opt/homebrew/bin/uv".to_string());
 
@@ -189,7 +189,7 @@ async fn run_task(task: String) -> Result<(), String> {
                     program, task, e
                 );
                 posthog_capture(
-                    "run_task_spawn_failed",
+                    "diag_task_spawn_failed",
                     serde_json::json!({ "task": task, "error": e.to_string() }),
                 );
             }
@@ -209,7 +209,7 @@ fn open_logs_dir() -> Result<(), String> {
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         let m = format!("Failed to create log directory: {}", e);
         posthog_capture(
-            "open_logs_failed",
+            "diag_logs_open_failed",
             serde_json::json!({ "stage": "mkdir", "error": m }),
         );
         return Err(m);
@@ -219,20 +219,20 @@ fn open_logs_dir() -> Result<(), String> {
     if let Err(e) = std::process::Command::new("open").arg(&log_dir).spawn() {
         let m = format!("Failed to open log directory: {}", e);
         posthog_capture(
-            "open_logs_failed",
+            "diag_logs_open_failed",
             serde_json::json!({ "stage": "finder", "error": m }),
         );
         return Err(m);
     }
 
-    posthog_capture("open_logs", serde_json::json!({}));
+    posthog_capture("logs_open", serde_json::json!({}));
     Ok(())
 }
 
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
     // Best-effort: app.exit races the fire-and-forget send, may be lost.
-    posthog_capture("quit", serde_json::json!({ "via": "command" }));
+    posthog_capture("rust_exit", serde_json::json!({ "via": "command" }));
     app.exit(0);
     Ok(())
 }
@@ -250,13 +250,13 @@ async fn check_and_install(
     handle: &tauri::AppHandle,
     source: &str,
 ) -> Result<UpdateOutcome, String> {
-    posthog_capture("updater_check", serde_json::json!({ "source": source }));
+    posthog_capture("app_update_check", serde_json::json!({ "source": source }));
     let updater = match handle.updater_builder().build() {
         Ok(u) => u,
         Err(e) => {
             let m = format!("builder error: {e}");
             posthog_capture(
-                "updater_error",
+                "app_update_failed",
                 serde_json::json!({ "stage": "builder", "detail": m, "source": source }),
             );
             return Err(m);
@@ -265,13 +265,13 @@ async fn check_and_install(
     let update = match updater.check().await {
         Ok(Some(u)) => u,
         Ok(None) => {
-            posthog_capture("updater_uptodate", serde_json::json!({ "source": source }));
+            posthog_capture("app_update_checked", serde_json::json!({ "result": "uptodate", "source": source }));
             return Ok(UpdateOutcome::UpToDate);
         }
         Err(e) => {
             let m = format!("check failed: {e}");
             posthog_capture(
-                "updater_error",
+                "app_update_failed",
                 serde_json::json!({ "stage": "check", "detail": m, "source": source }),
             );
             return Err(m);
@@ -282,13 +282,13 @@ async fn check_and_install(
     if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
         let m = format!("install failed: {e}");
         posthog_capture(
-            "updater_error",
+            "app_update_failed",
             serde_json::json!({ "stage": "install", "detail": m, "source": source }),
         );
         return Err(m);
     }
     posthog_capture(
-        "updater_installed",
+        "app_update_installed",
         serde_json::json!({ "to": target, "source": source }),
     );
     Ok(UpdateOutcome::Installed)
@@ -380,11 +380,11 @@ pub fn run() {
                     "quit" => {
                         // Best-effort: app.exit races the fire-and-forget send,
                         // so this event may be lost — acceptable.
-                        posthog_capture("tray_menu", serde_json::json!({ "item": "quit" }));
+                        posthog_capture("rust_exit", serde_json::json!({ "via": "tray_menu" }));
                         app.exit(0);
                     }
                     "check-update" => {
-                        posthog_capture("tray_menu", serde_json::json!({ "item": "check-update" }));
+                        // updater_check{source:"tray"} is emitted by check_and_install below
                         let h = app.clone();
                         tauri::async_runtime::spawn(async move {
                             match check_and_install(&h, "tray").await {
@@ -418,7 +418,7 @@ pub fn run() {
                             // Native-side interaction proof, independent of the
                             // webview: during a hang, tray_click keeps flowing
                             // while $autocapture/panel_open stop → webview hang.
-                            posthog_capture("tray_click", serde_json::json!({ "action": "hide" }));
+                            posthog_capture("panel_close", serde_json::json!({ "via": "tray" }));
                             return;
                         }
 
@@ -451,7 +451,7 @@ pub fn run() {
                         let _ = panel.show();
                         let _ = panel.set_focus();
                         let _ = app.emit("panel-event", "show");
-                        posthog_capture("tray_click", serde_json::json!({ "action": "open" }));
+                        posthog_capture("panel_open", serde_json::json!({ "via": "tray" }));
                     }
                 })
                 .build(app)?;
@@ -461,7 +461,7 @@ pub fn run() {
             panel.on_window_event(move |e| match e {
                 WindowEvent::Focused(false) => {
                     let _ = panel_for_blur.hide();
-                    posthog_capture("panel_blur_hide", serde_json::json!({}));
+                    posthog_capture("panel_close", serde_json::json!({ "via": "blur" }));
                 }
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
@@ -523,7 +523,7 @@ pub fn run() {
                                 // Use the shared transform helper — same shape as get_state
                                 let payload = read_and_transform_state(&path_clone);
                                 posthog_capture(
-                                    "state_changed",
+                                    "state_sync",
                                     serde_json::json!({
                                         "tasks": payload["tasks"].as_array().map(|a| a.len()),
                                         "mock": payload["mock"].as_bool().unwrap_or(false),
