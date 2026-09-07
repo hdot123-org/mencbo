@@ -1,8 +1,9 @@
 import posthog from "posthog-js";
 import { invoke } from "@tauri-apps/api/core";
 
-// PostHog US project "MenCbo Desktop" — capture-only key, public by design.
-const POSTHOG_KEY = "************************************************";
+// PostHog US project "MenCbo Desktop" — capture-only key, injected at build time via VITE_POSTHOG_KEY env var.
+// If not set (local dev without explicit injection), falls back to "NO_KEY" sentinel and all captures become no-op.
+const POSTHOG_KEY = import.meta.env.VITE_POSTHOG_KEY || "NO_KEY";
 const POSTHOG_HOST = "https://us.i.posthog.com";
 
 let launchedAt = 0;
@@ -20,18 +21,24 @@ let analyticsReady = false;
  * invariant (see p0-identity-unification round 3 diagnosis).
  */
 export async function initAnalytics() {
-  if (!POSTHOG_KEY) return;
+  if (!POSTHOG_KEY || POSTHOG_KEY === "NO_KEY") {
+    return;
+  }
 
   let identityOk = false;
   let installId = "";
   let sessionId = "";
   let failReason = "";
 
-  // Step 1: try to fetch identity from Rust
+  // Step 1: try to fetch identity from Rust (with 3s timeout)
   try {
-    const identity = await invoke<{ installId: string; sessionId: string }>(
+    const identityPromise = invoke<{ installId: string; sessionId: string }>(
       "analytics_identity",
     );
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("invoke timeout after 3s")), 3000)
+    );
+    const identity = await Promise.race([identityPromise, timeoutPromise]);
     installId = identity.installId;
     sessionId = identity.sessionId;
     identityOk = true;
@@ -90,10 +97,7 @@ export async function initAnalytics() {
     launchedAt = Date.now();
 
     // If identity failed, capture the diagnostic event first
-    if (!identityOk) {
-      capture("diag_identity_failed", { reason: failReason });
-    } else if (failReason) {
-      // Identity was ok but bootstrap init failed
+    if (!identityOk || failReason) {
       capture("diag_identity_failed", { reason: failReason });
     }
 

@@ -4,6 +4,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import posthog from "posthog-js";
 
+// Mock VITE_POSTHOG_KEY environment variable before importing analytics
+vi.stubEnv("VITE_POSTHOG_KEY", "test-key-12345");
+
 // Mock posthog-js
 vi.mock("posthog-js", () => ({
   default: {
@@ -23,6 +26,8 @@ describe("analytics identity injection", () => {
     vi.clearAllMocks();
     // Reset modules to get fresh imports
     vi.resetModules();
+    // Re-stub env after resetModules
+    vi.stubEnv("VITE_POSTHOG_KEY", "test-key-12345");
   });
 
   it("applies bootstrap distinctID from identity command", async () => {

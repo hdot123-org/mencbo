@@ -9,8 +9,9 @@ use tauri::{
 use tauri_plugin_updater::UpdaterExt;
 use identity::{get_or_create_install_id, generate_launch_id};
 
-/// PostHog observability (project key is public by design — capture-only).
-const POSTHOG_KEY: &str = "phc_BKjuzVRSBJ26E49hUin3nKxxN2wX8BeD4pSgixUxpcfF";
+/// PostHog observability. Key is injected at build time via build.rs from POSTHOG_KEY env var.
+/// If POSTHOG_KEY is not set, falls back to "NO_KEY" sentinel and all captures become no-op.
+const POSTHOG_KEY: &str = env!("POSTHOG_KEY", "PostHog key must be provided via POSTHOG_KEY env var or defaults to NO_KEY");
 const POSTHOG_URL: &str = "https://us.i.posthog.com/capture/";
 
 /// Global identity state (install_id + session_id) for this app instance.
@@ -22,6 +23,11 @@ static IDENTITY: OnceLock<(String, String)> = OnceLock::new();
 /// errors swallowed — must never block or kill the app (panic=abort profile).
 /// Uses install_id as distinct_id and includes session_id in all events.
 fn posthog_capture(event: &str, mut props: serde_json::Value) {
+    // No-op if PostHog key is not configured (VAL-ENV-005)
+    if POSTHOG_KEY == "NO_KEY" {
+        return;
+    }
+
     let event = event.to_string();
     let (install_id, session_id) = IDENTITY
         .get()
