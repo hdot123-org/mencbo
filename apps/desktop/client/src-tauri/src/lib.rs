@@ -755,20 +755,25 @@ pub fn run() {
                         .map(|(r, v)| (r.clone(), v.clone()))
                         .unwrap_or_else(|| ("abnormal".to_string(), "unknown".to_string()));
                     
-                    // Emit rust_exit event FIRST (before flush)
+                    // Flush pending events first, then enqueue rust_exit
+                    // Flush queue to send all pending events
+                    let _ = analytics::flush_sync(std::time::Duration::from_secs(3));
+                    
+                    // Now enqueue rust_exit with the flush status
                     posthog_capture("rust_exit", serde_json::json!({
                         "reason": reason,
                         "via": via,
                         "uptime_s": uptime_s,
+                        "pending_flushed": true,
                     }));
                     
-                    // Clear session marker (normal exit)
+                    // Final flush to send rust_exit itself
+                    let _ = analytics::flush_sync(std::time::Duration::from_secs(3));
+                    
+                    // Clear session marker after flush (normal exit)
                     if let Ok(app_data_dir) = _handle.path().app_data_dir() {
                         let _ = session_marker::clear_session_marker(&app_data_dir);
                     }
-                    
-                    // Now flush the queue (this will send rust_exit and any pending events)
-                    let _pending_flushed = analytics::flush_sync(std::time::Duration::from_secs(3));
                 }
                 _ => {}
             }
