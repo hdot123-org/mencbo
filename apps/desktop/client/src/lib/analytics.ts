@@ -1,5 +1,6 @@
 import posthog from "posthog-js";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 
 // PostHog US project "MenCbo Desktop" — capture-only key, injected at build time via VITE_POSTHOG_KEY env var.
 // If not set (local dev without explicit injection), falls back to "NO_KEY" sentinel and all captures become no-op.
@@ -12,6 +13,10 @@ let analyticsReady = false;
 /**
  * Initialize PostHog analytics with unified identity from Rust.
  *
+ * Environment gating: import.meta.env.DEV returns early (VAL-ENV-001).
+ * This is the JS-side equivalent of Rust's cfg!(debug_assertions) gate.
+ * Debug builds never initialize PostHog or send any events.
+ *
  * If the identity invoke or posthog.init with bootstrap fails, we:
  * 1. Fall back to a basic posthog.init (no bootstrap, persistence:memory)
  * 2. Capture a `diag_identity_failed` event with the failure reason
@@ -21,6 +26,11 @@ let analyticsReady = false;
  * invariant (see p0-identity-unification round 3 diagnosis).
  */
 export async function initAnalytics() {
+  // JS-side debug gate (VAL-ENV-001: dev 构建零上报)
+  if (import.meta.env.DEV) {
+    return;
+  }
+
   if (!POSTHOG_KEY || POSTHOG_KEY === "NO_KEY") {
     return;
   }
@@ -87,9 +97,19 @@ export async function initAnalytics() {
   // Step 4: register baseline properties and capture diagnostic + launch
   if (initOk) {
     if (identityOk) {
+      // Get app version from Tauri API (VAL-ENV-003)
+      const appVersion = await getVersion().catch(() => "unknown");
+      
       posthog.register({
         session_id: sessionId,
         source: "webview",
+        // Environment properties (VAL-ENV-002/003)
+        app_version: appVersion,
+        environment: "production", // JS only runs in release builds after DEV gate
+        platform: navigator.platform || "unknown",
+        arch: navigator.userAgent.includes("arm64") || navigator.userAgent.includes("aarch64") 
+          ? "aarch64" 
+          : "x86_64",
       });
     }
 
