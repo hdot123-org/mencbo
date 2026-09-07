@@ -133,15 +133,25 @@ jobs:
             > "$B/latest.json"
           cat "$B/latest.json"
 
+      - name: Stage release artifacts (flat)
+        # upload-artifact keys off the least-common-ancestor of the given
+        # paths; multi-dir paths therefore keep their directory layout in the
+        # artifact and gh release upload then chokes on directories. Copy
+        # everything into one flat staging dir instead.
+        run: |
+          B=apps/desktop/client/src-tauri/target/release/bundle
+          STAGE=$(mktemp -d)
+          cp "$B"/dmg/*.dmg "$STAGE/"
+          cp "$B"/macos/MenCbo.app.tar.gz "$B"/macos/MenCbo.app.tar.gz.sig "$STAGE/"
+          cp "$B"/latest.json "$STAGE/"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+          ls -lh "$STAGE/"
+
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: mencbo-macos-dmg
-          path: |
-            apps/desktop/client/src-tauri/target/release/bundle/dmg/*.dmg
-            apps/desktop/client/src-tauri/target/release/bundle/macos/MenCbo.app.tar.gz
-            apps/desktop/client/src-tauri/target/release/bundle/macos/MenCbo.app.tar.gz.sig
-            apps/desktop/client/src-tauri/target/release/bundle/latest.json
+          path: ${{ env.STAGE }}/*
           if-no-files-found: error
 
   github-release:
