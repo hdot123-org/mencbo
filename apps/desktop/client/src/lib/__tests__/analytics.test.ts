@@ -1,7 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import posthog from "posthog-js";
 
 // Mock VITE_POSTHOG_KEY environment variable before importing analytics
@@ -24,6 +24,11 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
+// Mock @tauri-apps/api/app - must return a Promise for .catch() chain
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: vi.fn(() => Promise.resolve("0.2.4")),
+}));
+
 describe("analytics identity injection", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -31,6 +36,12 @@ describe("analytics identity injection", () => {
     vi.resetModules();
     // Re-stub env after resetModules
     vi.stubEnv("VITE_POSTHOG_KEY", "test-key-12345");
+    vi.stubEnv("DEV", false);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it("applies bootstrap distinctID from identity command", async () => {
@@ -169,6 +180,69 @@ describe("analytics identity injection", () => {
         app_version: expect.any(String),
         platform: expect.any(String),
         arch: expect.any(String),
+      })
+    );
+  });
+
+  it("buffers events captured before identity is ready (race condition fix)", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const mockInvoke = vi.mocked(invoke);
+    
+    // Simulate delayed identity resolution (e.g., 50ms)
+    let resolveIdentity: (value: any) => void;
+    const identityPromise = new Promise((resolve) => {
+      resolveIdentity = resolve;
+    });
+    mockInvoke.mockReturnValue(identityPromise as any);
+
+    // Import and start init (but don't await yet)
+    const { initAnalytics, capture } = await import("../analytics");
+    const initPromise = initAnalytics();
+
+    // Capture an event BEFORE identity is ready (simulates App.tsx state_load race)
+    capture("state_load", { tasks: 5, duration_ms: 10 });
+    capture("state_sync", { tasks: 5 });
+
+    // Verify no events were sent yet (buffered)
+    expect(posthog.capture).not.toHaveBeenCalledWith(
+      "state_load",
+      expect.anything()
+    );
+
+    // Now resolve identity
+    resolveIdentity!({
+      installId: "desktop-test-uuid-1234",
+      sessionId: "session-5678",
+      platform: "darwin",
+      arch: "aarch64",
+    });
+
+    // Wait for init to complete
+    await initPromise;
+
+    // Verify buffered events were flushed IN ORDER after identity was ready
+    const captureCalls = vi.mocked(posthog.capture).mock.calls;
+    const eventNames = captureCalls.map((call) => call[0]);
+    
+    // Buffered events should be flushed first in original order
+    const stateLoadIndex = eventNames.indexOf("state_load");
+    const stateSyncIndex = eventNames.indexOf("state_sync");
+    const jsLaunchIndex = eventNames.indexOf("js_launch");
+    
+    expect(stateLoadIndex).toBeGreaterThanOrEqual(0);
+    expect(stateSyncIndex).toBeGreaterThan(stateLoadIndex);
+    
+    // js_launch comes after buffered events (it's captured after flush)
+    expect(jsLaunchIndex).toBeGreaterThan(stateSyncIndex);
+    
+    // Verify state_load has correct properties
+    const stateLoadCall = captureCalls.find((call) => call[0] === "state_load");
+    expect(stateLoadCall).toBeDefined();
+    expect(stateLoadCall![1]).toEqual(
+      expect.objectContaining({
+        tasks: 5,
+        duration_ms: 10,
+        app: "mencbo-desktop",
       })
     );
   });

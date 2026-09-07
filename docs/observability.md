@@ -55,9 +55,14 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 | `environment` | string | `"production"` | `production` / `development` |
 | `session_id` | string | uuidv7 | Current launch ID |
 | `source` | string | `"rust_native"` / `"webview"` | Event origin layer |
+| `platform` | string | `"macos"` / `"windows"` / `"linux"` | Operating system |
+| `arch` | string | `"aarch64"` / `"x86_64"` | CPU architecture |
 
-**Optional properties** (event-specific):
-- `platform` / `arch`: e.g., `macos` / `aarch64`
+**Additional context properties** (automatically attached by Rust layer):
+- `os_version`: OS version string (e.g., `"14.5"` for macOS, `"10.0.19045"` for Windows). Provided by `os_info` crate.
+- `platform_arch`: Combined identifier for easier filtering (e.g., `"macos-aarch64"`)
+
+**Event-specific properties**:
 - `status`: `success` / `failure`
 - `duration_ms`, `error_code`, `target_id`
 
@@ -150,6 +155,7 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 | `diag_native_main_unresponsive` | rust | Main thread probe timeout | — |
 | `diag_ipc_timeout` | webview | Tauri invoke timeout | `error_code`, `timeout_ms` |
 | `diag_rust_panic` | rust | Panic hook | `message`, `backtrace` |
+| `app_update_downloaded` | rust | Update binary downloaded | `version`, `source` |
 
 ---
 

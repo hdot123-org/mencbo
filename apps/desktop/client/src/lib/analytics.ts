@@ -10,6 +10,10 @@ const POSTHOG_HOST = "https://us.i.posthog.com";
 let launchedAt = 0;
 let analyticsReady = false;
 
+// Event buffer: events captured before identity is ready are queued here
+// and flushed in order once register() completes (fixes session_id race).
+const eventBuffer: Array<{ event: string; props?: Record<string, unknown> }> = [];
+
 /**
  * Initialize PostHog analytics with unified identity from Rust.
  *
@@ -120,6 +124,10 @@ export async function initAnalytics() {
     analyticsReady = true;
     launchedAt = Date.now();
 
+    // Flush any events that were buffered before identity was ready
+    // This fixes the race condition where state_load fires before session_id is set
+    flushBufferedEvents();
+
     // If identity failed, capture the diagnostic event first
     if (!identityOk || failReason) {
       capture("diag_identity_failed", { reason: failReason });
@@ -155,8 +163,25 @@ export async function initAnalytics() {
 
 export function capture(event: string, props?: Record<string, unknown>) {
   try {
+    if (!analyticsReady) {
+      // Buffer event until identity is ready (fixes session_id race)
+      eventBuffer.push({ event, props });
+      return;
+    }
     posthog.capture(event, { app: "mencbo-desktop", ...props });
   } catch {
     /* never break the app for analytics */
+  }
+}
+
+function flushBufferedEvents() {
+  // Flush all buffered events in order after register() is called
+  const buffered = eventBuffer.splice(0, eventBuffer.length);
+  for (const { event, props } of buffered) {
+    try {
+      posthog.capture(event, { app: "mencbo-desktop", ...props });
+    } catch {
+      /* never break the app for analytics */
+    }
   }
 }
