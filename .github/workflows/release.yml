@@ -1,0 +1,102 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  verify:
+    name: Verify & Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/mencbo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Check tag matches package.json version
+        run: |
+          PKG_VERSION="v$(node -p "require('./package.json').version")"
+          if [ "${PKG_VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${PKG_VERSION}"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm run build
+
+  github-release:
+    name: Create GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create release with auto-generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --generate-notes
+
+  npm-publish:
+    name: Publish to npm
+    needs: verify
+    # Skips until NPM_TOKEN secret is configured on the repo
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: packages/mencbo
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - name: Skip notice
+        if: env.NPM_TOKEN == ''
+        run: echo "::notice::NPM_TOKEN secret not configured — npm publish skipped"
+
+      - uses: actions/checkout@v4
+        if: env.NPM_TOKEN != ''
+
+      - uses: pnpm/action-setup@v4
+        if: env.NPM_TOKEN != ''
+
+      - uses: actions/setup-node@v4
+        if: env.NPM_TOKEN != ''
+        with:
+          node-version: 22
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        if: env.NPM_TOKEN != ''
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        if: env.NPM_TOKEN != ''
+        run: pnpm run build
+
+      - name: Publish
+        if: env.NPM_TOKEN != ''
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
