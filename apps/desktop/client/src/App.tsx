@@ -25,10 +25,10 @@ function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen bg-neutral-900 text-neutral-100">
-      {state.mock && !inTauri && (
+      {state.mock && (
         <div
           data-testid="mock-badge"
-          className="absolute top-2 right-2 px-2 py-0.5 text-[10px] font-medium text-neutral-400 bg-neutral-800 rounded"
+          className="absolute top-2 right-2 px-2 py-0.5 text-[10px] font-medium text-neutral-400 bg-neutral-800 rounded z-10"
         >
           MOCK
         </div>

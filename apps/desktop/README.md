@@ -6,10 +6,10 @@ MenCbo 桌面控制台与调度宿主 —— macOS 菜单栏常驻托盘控制�
 
 ```
 daemon/    Phase 1-2 · Python 单进程统一调度守护器（uv 管理）
-client/    Phase 3 · Tauri v2 + TypeScript 控制台客户端（未启动）
+client/    Phase 3 · Tauri v2 + TypeScript 控制台客户端
 ```
 
-守护器通过 pnpm workspace 与 `packages/mencbo`（TS 记忆引擎库）同仓联动：客户端未来以 `workspace:*` 依赖该库实现自己的记忆层，改库即刻热更新，无需发包联调。
+守护器通过 pnpm workspace 与 `packages/mencbo`（TS 记忆引擎库）同仓联动：客户端以 `workspace:*` 依赖该库实现自己的记忆层，改库即刻热更新，无需发包联调。
 
 ## 架构
 
@@ -36,8 +36,63 @@ client/    Phase 3 · Tauri v2 + TypeScript 控制台客户端（未启动）
 ## 路线图
 
 - [x] **Phase 1** 基础契约：`TaskSpec`、Git 作用域解析、示例任务清单（30 测试）
-- [ ] **Phase 2** 单进程 asyncio 统一调度器、`~/.mencbo/state.json`、CLI status
-- [ ] **Phase 3** Tauri v2 客户端外壳
+- [x] **Phase 2** 单进程 asyncio 统一调度器、`~/.mencbo/state.json`、CLI status
+- [x] **Phase 3** Tauri v2 客户端外壳 + daemon 联动
 - [ ] **Phase 4** sidecar 冻结打包与 `MenCbo.dmg` 交付
 
 守护器开发命令见 [daemon/README.md](daemon/README.md)。
+
+## 运行手册
+
+### 启动 daemon（后台调度器）
+
+```bash
+cd apps/desktop/daemon
+/opt/homebrew/bin/uv run python -m mencbo run
+```
+
+daemon 会在后台运行，定时执行注册的任务并写入 `~/.mencbo/state.json`。
+
+**查看状态**：
+```bash
+/opt/homebrew/bin/uv run python -m mencbo status
+```
+
+**立即执行单个任务**：
+```bash
+/opt/homebrew/bin/uv run python -m mencbo run-task example:heartbeat
+```
+
+### 启动客户端（Tauri 开发模式）
+
+```bash
+cd apps/desktop/client
+pnpm tauri dev
+```
+
+这会启动 macOS 菜单栏托盘应用，实时读取 daemon 写入的 state.json 并显示任务状态。
+
+### 浏览器预览模式（无需 Tauri）
+
+```bash
+cd apps/desktop/client
+pnpm dev
+```
+
+然后打开 `http://localhost:1420`。浏览器模式使用内置 mock 数据，适合快速预览 UI。
+
+**场景切换**：
+- 默认三任务演示：`http://localhost:1420/`
+- 仅成功/运行中：`http://localhost:1420/?scenario=ok`
+- 空状态：`http://localhost:1420/?scenario=empty`
+
+### 种子数据脚本（可选）
+
+向 `~/.mencbo/state.json` 写入演示数据：
+
+```bash
+cd apps/desktop/client
+pnpm exec tsx scripts/seed-state.ts
+```
+
+这会在 daemon 未运行时快速预览面板效果。

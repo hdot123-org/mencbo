@@ -312,11 +312,14 @@ pub fn run() {
                     Err(_) => return,
                 };
 
-                // Watch parent dir if it exists; if not, the watcher will pick it up
-                // when the daemon creates it (we can add it later or use RecursiveMode).
-                if watch_dir.exists() {
-                    let _ = watcher.watch(&watch_dir, RecursiveMode::NonRecursive);
-                }
+                // FIX (M1 scrutiny round-2): Ensure the watch directory exists
+                // before mounting the watcher. On a pristine machine where
+                // ~/.mencbo doesn't exist yet, the watcher would silently skip
+                // and never detect the daemon's first atomic write. create_dir_all
+                // only creates the directory — it never writes state.json (红线 6).
+                let _ = std::fs::create_dir_all(&watch_dir);
+
+                let _ = watcher.watch(&watch_dir, RecursiveMode::NonRecursive);
 
                 // Keep watcher alive
                 loop {

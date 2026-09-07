@@ -15,6 +15,9 @@ function getScenario(): string {
 /**
  * Load state from Rust backend (Tauri) or return mock (browser).
  * In browser mode, respects ?scenario= URL parameter.
+ * When Tauri returns {mock: true, tasks: []} (state.json missing or corrupt),
+ * we fall back to built-in mock data — same fixture as browser mode.
+ * This is required for VAL-CROSS-005: no state.json → show mock + MOCK badge.
  */
 export async function loadState(): Promise<State> {
   if (!inTauri) {
@@ -31,7 +34,15 @@ export async function loadState(): Promise<State> {
   }
   try {
     const { invoke } = await import("@tauri-apps/api/core");
-    return await invoke<State>("get_state");
+    const result = await invoke<State>("get_state");
+    // VAL-CROSS-005: Rust returns {mock: true, tasks: []} when state.json is
+    // missing or corrupt. Frontend must fall back to built-in mock fixture
+    // (same as browser mode) so user sees demo data + MOCK badge instead of
+    // an empty "暂无任务" screen.
+    if (result.mock && (!Array.isArray(result.tasks) || result.tasks.length === 0)) {
+      return MOCK_STATE;
+    }
+    return result;
   } catch {
     return MOCK_STATE;
   }
