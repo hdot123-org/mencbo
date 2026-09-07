@@ -56,7 +56,7 @@ def _init_repo(
 
 
 class TestResolveStatePath:
-    def test_env_redirect(self, tmp_path, monkeypatch):
+    def test_state_path_env_redirect(self, tmp_path, monkeypatch):
         """VAL-DAEMON-006：MENCBO_STATE_PATH 重定向生效。"""
         redirect = tmp_path / "custom" / "state.json"
         monkeypatch.setenv("MENCBO_STATE_PATH", str(redirect))

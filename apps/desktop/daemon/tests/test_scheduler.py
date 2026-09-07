@@ -78,17 +78,17 @@ class TestIntervalToSeconds:
 
 
 class TestMatchesCron:
-    def test_matches_cron_hit(self):
+    def test_cron_match_hit(self):
         """VAL-DAEMON-010：匹配。"""
         now = datetime(2026, 9, 6, 3, 0, 0, tzinfo=timezone.utc)  # 周日 03:00
         assert matches_cron({"hour": 3, "minute": 0}, now) is True
 
-    def test_matches_cron_miss(self):
+    def test_cron_match_miss(self):
         """VAL-DAEMON-010：不匹配。"""
         now = datetime(2026, 9, 6, 3, 1, 0, tzinfo=timezone.utc)  # 周日 03:01
         assert matches_cron({"hour": 3, "minute": 0}, now) is False
 
-    def test_matches_cron_multi_field(self):
+    def test_cron_match_multi_field(self):
         """VAL-DAEMON-010：多字段 AND。"""
         now_match = datetime(2026, 9, 15, 3, 0, 0, tzinfo=timezone.utc)
         assert matches_cron({"hour": 3, "minute": 0, "day": 15}, now_match) is True
@@ -96,12 +96,12 @@ class TestMatchesCron:
         now_mismatch = datetime(2026, 9, 16, 3, 0, 0, tzinfo=timezone.utc)
         assert matches_cron({"hour": 3, "minute": 0, "day": 15}, now_mismatch) is False
 
-    def test_matches_cron_wildcard(self):
+    def test_cron_match_wildcard(self):
         """VAL-DAEMON-010：通配（只给 minute）。"""
         now = datetime(2026, 9, 6, 5, 30, 0, tzinfo=timezone.utc)  # 任意小时 :30
         assert matches_cron({"minute": 30}, now) is True
 
-    def test_matches_cron_weekday(self):
+    def test_cron_match_weekday(self):
         """VAL-DAEMON-010：weekday（cron 惯例 0=周日）。"""
         # 2026-09-06 是周日（cron weekday=0）
         now_sunday = datetime(2026, 9, 6, 3, 0, 0, tzinfo=timezone.utc)

@@ -52,6 +52,10 @@ export async function loadState(): Promise<State> {
  * Subscribe to state changes.
  * In Tauri: listen to "state-changed" events.
  * In browser: no-op (mock is static).
+ * 
+ * When Rust emits {mock: true, tasks: []} (e.g., during a momentary read of
+ * a missing/corrupt state.json), fall back to MOCK_STATE to prevent the panel
+ * from flipping to empty state. This aligns with loadState's fallback strategy.
  */
 export function subscribeState(cb: (s: State) => void): () => void {
   if (!inTauri) {
@@ -59,7 +63,18 @@ export function subscribeState(cb: (s: State) => void): () => void {
   }
   let unlisten: (() => void) | undefined;
   import("@tauri-apps/api/event").then(({ listen }) => {
-    listen<State>("state-changed", (event) => cb(event.payload)).then((un) => {
+    listen<State>("state-changed", (event) => {
+      const payload = event.payload;
+      // Apply the same fallback strategy as loadState: if Rust returns
+      // {mock: true, tasks: []}, use MOCK_STATE instead of the empty payload.
+      // This prevents the panel from showing "暂无任务" when state.json is
+      // momentarily missing or being written.
+      if (payload.mock && (!Array.isArray(payload.tasks) || payload.tasks.length === 0)) {
+        cb(MOCK_STATE);
+      } else {
+        cb(payload);
+      }
+    }).then((un) => {
       unlisten = un;
     });
   });

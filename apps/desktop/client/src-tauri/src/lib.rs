@@ -57,8 +57,12 @@ fn read_and_transform_state(path: &std::path::Path) -> Value {
                 if let Some(tasks_map) = val.get("tasks").and_then(|t| t.as_object()) {
                     let tasks_array: Vec<Value> = tasks_map
                         .iter()
-                        .map(|(task_id, task_data)| {
-                            let mut task = task_data.clone();
+                        .filter_map(|(task_id, task_data)| {
+                            // Defensive: skip malformed entries where task_data is not an object
+                            // (e.g., if daemon writes a string or number instead of an object).
+                            // This prevents the watcher thread from panicking and stopping.
+                            let task_obj = task_data.as_object()?;
+                            let mut task = Value::Object(task_obj.clone());
                             // Add id field from the map key
                             task["id"] = Value::String(task_id.clone());
                             // Rename display_name -> name
@@ -76,7 +80,7 @@ fn read_and_transform_state(path: &std::path::Path) -> Value {
                                 task["durationMs"] = duration_ms.clone();
                                 task.as_object_mut().unwrap().remove("duration_ms");
                             }
-                            task
+                            Some(task)
                         })
                         .collect();
                     transformed["tasks"] = Value::Array(tasks_array);
@@ -97,6 +101,17 @@ fn resolve_state_path() -> std::path::PathBuf {
     } else {
         let home = std::env::var("HOME").unwrap_or_default();
         std::path::PathBuf::from(format!("{home}/.mencbo/state.json"))
+    }
+}
+
+/// Resolve the log directory: MENCBO_LOG_DIR env var takes priority,
+/// fallback to {tempdir}/mencbo — aligned with daemon's _DEFAULT_LOG_DIR
+/// (example_tasks.py: ``Path(tempfile.gettempdir()) / "mencbo"``).
+fn resolve_log_dir() -> std::path::PathBuf {
+    if let Ok(d) = std::env::var("MENCBO_LOG_DIR") {
+        std::path::PathBuf::from(d)
+    } else {
+        std::env::temp_dir().join("mencbo")
     }
 }
 
@@ -127,27 +142,41 @@ async fn run_task(task: String) -> Result<(), String> {
     let (program, args, cwd) = build_run_task_command(&task, &uv_bin, &daemon_cwd);
 
     tauri::async_runtime::spawn_blocking(move || {
-        let _ = std::process::Command::new(&program)
+        match std::process::Command::new(&program)
             .current_dir(&cwd)
             .args(&args)
-            .spawn();
+            .spawn()
+        {
+            Ok(_) => {}
+            Err(e) => {
+                // Log spawn failure to stderr so it's visible in dev console / system log.
+                // This makes missing uv or permission errors diagnosable instead of silent.
+                eprintln!(
+                    "[mencbo] run_task spawn failed (program={}, task={}): {}",
+                    program, task, e
+                );
+            }
+        }
     });
     Ok(())
 }
 
 #[tauri::command]
 fn open_logs_dir() -> Result<(), String> {
-    let log_dir = if let Ok(d) = std::env::var("MENCBO_LOG_DIR") {
-        d
-    } else {
-        let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-        format!("{home}/.mencbo/logs")
-    };
-    // Ensure dir exists
-    let _ = std::fs::create_dir_all(&log_dir);
-    let _ = std::process::Command::new("open")
+    // Resolve log directory: MENCBO_LOG_DIR takes priority, fallback to {tempdir}/mencbo
+    // (aligned with daemon's _DEFAULT_LOG_DIR in example_tasks.py:16)
+    let log_dir = resolve_log_dir();
+    
+    // create_dir_all is idempotent and only creates if missing.
+    // This ensures the directory exists before opening it in Finder.
+    std::fs::create_dir_all(&log_dir).map_err(|e| format!("Failed to create log directory: {}", e))?;
+    
+    // Open the directory in Finder (macOS)
+    std::process::Command::new("open")
         .arg(&log_dir)
-        .spawn();
+        .spawn()
+        .map_err(|e| format!("Failed to open log directory: {}", e))?;
+    
     Ok(())
 }
 
@@ -273,7 +302,8 @@ pub fn run() {
                     None => return,
                 };
 
-                // Do NOT create the directory or file here — client is read-only.
+                // Do NOT create the state.json file here — client is read-only (红线 6).
+                // The directory will be created below if needed (watcher requires it to exist).
 
                 let handle = app_handle.clone();
                 let path_clone = state_path.clone();
@@ -284,8 +314,6 @@ pub fn run() {
                         // Only react to events that could affect our target file.
                         // We watch the parent dir, so we get events for all files
                         // in it; filter by file name to avoid spurious wakes.
-                        // Note: EventKind::Modify(_) covers all modify variants including
-                        // Modify(Name(_)) which is how atomic os.replace may surface.
                         let relevant = match &event.kind {
                             EventKind::Create(_) | EventKind::Modify(_) => {
                                 // Check if any affected path matches our target filename
@@ -316,7 +344,8 @@ pub fn run() {
                 // before mounting the watcher. On a pristine machine where
                 // ~/.mencbo doesn't exist yet, the watcher would silently skip
                 // and never detect the daemon's first atomic write. create_dir_all
-                // only creates the directory — it never writes state.json (红线 6).
+                // creates the directory if missing (idempotent) — it never writes
+                // state.json (红线 6: client is pure reader, daemon is sole writer).
                 let _ = std::fs::create_dir_all(&watch_dir);
 
                 let _ = watcher.watch(&watch_dir, RecursiveMode::NonRecursive);
@@ -722,5 +751,84 @@ mod tests {
 
         std::env::remove_var("MENCBO_STATE_PATH");
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn resolve_log_dir_default() {
+        // When MENCBO_LOG_DIR is not set, should return {tempdir}/mencbo
+        // This aligns with daemon's _DEFAULT_LOG_DIR
+        let _lock = ENV_MUTEX.lock().unwrap();
+        
+        // Remove the env var to test default behavior
+        std::env::remove_var("MENCBO_LOG_DIR");
+        
+        let result = resolve_log_dir();
+        let expected = std::env::temp_dir().join("mencbo");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn resolve_log_dir_env_override() {
+        // When MENCBO_LOG_DIR is set, it should take priority
+        let _lock = ENV_MUTEX.lock().unwrap();
+        
+        let custom_path = std::env::temp_dir().join("custom_logs_test");
+        std::env::set_var("MENCBO_LOG_DIR", &custom_path);
+        
+        let result = resolve_log_dir();
+        assert_eq!(result, custom_path);
+        
+        std::env::remove_var("MENCBO_LOG_DIR");
+    }
+
+    #[test]
+    fn read_and_transform_state_malformed_task_entry() {
+        // Test that malformed task entries (non-object values) are skipped
+        // instead of causing a panic. This is a defensive measure against
+        // corrupted state.json files.
+        let _lock = ENV_MUTEX.lock().unwrap();
+
+        let temp_dir = std::env::temp_dir().join("mencbo_test_malformed_tasks");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let state_path = temp_dir.join("state.json");
+
+        // Create state with mixed valid and malformed task entries
+        let state_json = r#"{
+            "updated_at": "2026-09-07T01:50:00+00:00",
+            "project_id": "test/project",
+            "health": "ok",
+            "tasks": {
+                "valid:task": {
+                    "display_name": "Valid Task",
+                    "last_run": "2026-09-07T01:30:00+00:00",
+                    "status": "success",
+                    "duration_ms": 100,
+                    "error": null
+                },
+                "malformed:string": "this is not an object",
+                "malformed:number": 42,
+                "malformed:null": null,
+                "malformed:array": [1, 2, 3]
+            }
+        }"#;
+
+        std::fs::write(&state_path, state_json).unwrap();
+        std::env::set_var("MENCBO_STATE_PATH", &state_path);
+
+        // Should not panic and should only include the valid task
+        let result = get_state().unwrap();
+        
+        // Verify we got the valid task
+        let tasks = result["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1, "Should only contain the valid task");
+        
+        let valid_task = &tasks[0];
+        assert_eq!(valid_task["id"], "valid:task");
+        assert_eq!(valid_task["name"], "Valid Task");
+        assert_eq!(valid_task["status"], "success");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::env::remove_var("MENCBO_STATE_PATH");
     }
 }

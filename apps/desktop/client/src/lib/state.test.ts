@@ -152,3 +152,98 @@ describe("triggerTask", () => {
     expect(consoleSpy).toHaveBeenCalledWith("[mock] trigger task:", "test:task");
   });
 });
+
+describe("subscribeState", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    delete (globalThis as any).__TEST_IN_TAURI;
+    vi.restoreAllMocks();
+  });
+
+  it("no-op in browser mode", async () => {
+    (globalThis as any).__TEST_IN_TAURI = false;
+    vi.resetModules();
+    const { subscribeState } = await import("./state");
+    const cb = vi.fn();
+    const unlisten = subscribeState(cb);
+    expect(typeof unlisten).toBe("function");
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("falls back to MOCK_STATE when event payload is {mock: true, tasks: []}", async () => {
+    (globalThis as any).__TEST_IN_TAURI = true;
+
+    // Mock the listen function to simulate an event
+    const mockListen = vi.fn((_event: string, callback: any) => {
+      // Simulate Rust emitting a mock payload
+      setTimeout(() => {
+        callback({ payload: { mock: true, tasks: [] } });
+      }, 10);
+      return Promise.resolve(() => {});
+    });
+
+    vi.doMock("@tauri-apps/api/event", () => ({
+      listen: mockListen,
+    }));
+
+    const { subscribeState } = await import("./state");
+    const cb = vi.fn();
+    subscribeState(cb);
+
+    // Wait for the async event to fire
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Should have called the callback with MOCK_STATE (3 tasks), not the empty payload
+    expect(cb).toHaveBeenCalledTimes(1);
+    const receivedState = cb.mock.calls[0][0];
+    expect(receivedState.mock).toBe(true);
+    expect(receivedState.tasks).toHaveLength(3);
+    const ids = receivedState.tasks.map((t: any) => t.id).sort();
+    expect(ids).toEqual([
+      "example:failure-demo",
+      "example:heartbeat",
+      "example:maintenance",
+    ]);
+  });
+
+  it("passes through non-mock payloads unchanged", async () => {
+    (globalThis as any).__TEST_IN_TAURI = true;
+
+    const realState = {
+      mock: false,
+      health: "ok",
+      tasks: [
+        {
+          id: "real:task",
+          name: "Real Task",
+          status: "success",
+          lastRun: new Date().toISOString(),
+          durationMs: 100,
+        },
+      ],
+    };
+
+    const mockListen = vi.fn((_event: string, callback: any) => {
+      setTimeout(() => {
+        callback({ payload: realState });
+      }, 10);
+      return Promise.resolve(() => {});
+    });
+
+    vi.doMock("@tauri-apps/api/event", () => ({
+      listen: mockListen,
+    }));
+
+    const { subscribeState } = await import("./state");
+    const cb = vi.fn();
+    subscribeState(cb);
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(cb).toHaveBeenCalledTimes(1);
+    expect(cb).toHaveBeenCalledWith(realState);
+  });
+});
