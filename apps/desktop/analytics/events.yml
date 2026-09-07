@@ -40,8 +40,10 @@ events:
     layer: rust
     status: active
     props:
-      via: string  # command | tray_menu
-    description: Process exit (best-effort, may be lost)
+      reason: string  # normal | dirty | abnormal
+      via: string     # command | tray_menu | unknown
+      uptime_s: number
+    description: Process exit event (architecture decision 4: rust 权威退出事件)
 
   rust_heartbeat:
     layer: rust
