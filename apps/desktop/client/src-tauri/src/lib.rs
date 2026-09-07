@@ -1,5 +1,6 @@
 mod analytics;
 mod identity;
+mod session_marker;
 
 use serde_json::Value;
 use tauri::{
@@ -23,6 +24,15 @@ static IDENTITY: OnceLock<(String, String)> = OnceLock::new();
 /// Global app version for analytics events. Set once during setup from tauri context.
 /// This avoids passing app context through every posthog_capture call.
 static APP_VERSION: OnceLock<String> = OnceLock::new();
+
+/// Global startup timestamp for calculating session uptime in exit events.
+/// Set during app setup, used to compute `uptime_s` in rust_exit{normal}.
+static STARTED_AT: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Tracks the exit reason and "via" field for normal exits.
+/// Set by quit paths (command, tray, window close), consumed by RunEvent::Exit.
+/// Architecture decision 4: rust_exit is the authoritative exit event.
+static EXIT_INFO: OnceLock<(String, String)> = OnceLock::new();
 
 /// Fire-and-forget analytics from the Rust side: enqueue to batch queue.
 /// The batch queue handles batching (20 items or 60s), retry with exponential backoff,
@@ -308,8 +318,8 @@ fn open_logs_dir() -> Result<(), String> {
 
 #[tauri::command]
 fn quit_app(app: tauri::AppHandle) -> Result<(), String> {
-    // Best-effort: app.exit races the fire-and-forget send, may be lost.
-    posthog_capture("rust_exit", serde_json::json!({ "via": "command" }));
+    // Record exit info for RunEvent::Exit to consume (architecture decision 4)
+    let _ = EXIT_INFO.set(("normal".to_string(), "command".to_string()));
     app.exit(0);
     Ok(())
 }
@@ -412,18 +422,44 @@ pub fn run() {
             APP_VERSION
                 .set(app_version.clone())
                 .expect("APP_VERSION already initialized");
+            
+            // Record startup time for session duration calculation on exit
+            STARTED_AT.set(std::time::Instant::now())
+                .expect("STARTED_AT already initialized");
 
             // Initialize identity before any analytics events.
             // FIX (fix-m1-review-findings): graceful degradation instead of .expect.
             // "Analytics never kills the host" invariant — if install_id IO fails,
             // disable capture entirely and log the error locally.
+            let mut pending_dirty_exit: Option<(String, String)> = None; // (prev_session_id, prev_started_at)
+            
             let identity_ok = (|| -> Result<(), String> {
                 let app_data_dir = app.path().app_data_dir()
                     .map_err(|e| format!("cannot get app_data_dir: {}", e))?;
+                
+                // Check for dirty exit from previous session BEFORE writing marker
+                // Architecture decision 4: detect crashes/kills via leftover marker
+                if let Some(dirty_info) = session_marker::check_dirty_exit(&app_data_dir) {
+                    // Previous session didn't exit cleanly
+                    // Save info to emit rust_exit{dirty} after analytics is initialized
+                    pending_dirty_exit = Some((dirty_info.prev_session_id, dirty_info.prev_started_at));
+                    
+                    // Clear the old marker (will be replaced by new session marker below)
+                    let _ = session_marker::clear_session_marker(&app_data_dir);
+                }
+                
                 let install_id = get_or_create_install_id(&app_data_dir)?;
                 let session_id = generate_launch_id();
-                IDENTITY.set((install_id, session_id))
+                IDENTITY.set((install_id, session_id.clone()))
                     .map_err(|_| "Identity already initialized".to_string())?;
+                
+                // Write session marker for this session
+                let started_at = analytics::now_rfc3339();
+                if let Err(e) = session_marker::write_session_marker(&app_data_dir, &session_id, &started_at) {
+                    eprintln!("[mencbo] failed to write session marker: {}", e);
+                    // Non-fatal: continue even if marker write fails
+                }
+                
                 Ok(())
             })();
 
@@ -438,6 +474,22 @@ pub fn run() {
             // Uses a blocking thread for periodic flush (20 items or 60s).
             // Global singleton reqwest::blocking::Client is created here and reused.
             analytics::init(POSTHOG_KEY, POSTHOG_HOST);
+
+            // Emit dirty exit event if previous session didn't exit cleanly
+            // This must happen after analytics::init() so the event can be queued
+            if let Some((prev_session_id, prev_started_at)) = pending_dirty_exit {
+                let uptime_s = session_marker::estimate_uptime_seconds(&prev_started_at)
+                    .unwrap_or(0);
+                
+                posthog_capture(
+                    "rust_exit",
+                    serde_json::json!({
+                        "reason": "dirty",
+                        "prev_session_id": prev_session_id,
+                        "uptime_s": uptime_s
+                    }),
+                );
+            }
 
             // Rust-side observability, independent of the webview: launch
             // marker + 5-min heartbeat. If rust_heartbeat keeps flowing while
@@ -499,9 +551,9 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "quit" => {
-                        // Best-effort: app.exit races the fire-and-forget send,
-                        // so this event may be lost — acceptable.
-                        posthog_capture("rust_exit", serde_json::json!({ "via": "tray_menu" }));
+                        // Architecture decision 4: rust_exit is authoritative
+                        // Set EXIT_INFO so RunEvent::Exit can emit the event
+                        let _ = EXIT_INFO.set(("normal".to_string(), "tray_menu".to_string()));
                         app.exit(0);
                     }
                     "check-update" => {
@@ -690,10 +742,33 @@ pub fn run() {
                         api.prevent_exit();
                     }
                 }
-                // Flush batch queue synchronously on exit (VAL-REL-001).
-                // This ensures pending analytics events are sent before the process terminates.
                 tauri::RunEvent::Exit => {
-                    analytics::flush_sync(std::time::Duration::from_secs(3));
+                    // Architecture decision 4: Emit rust_exit event before flushing
+                    // Calculate session uptime
+                    let uptime_s = STARTED_AT
+                        .get()
+                        .map(|t| t.elapsed().as_secs())
+                        .unwrap_or(0);
+                    
+                    // Determine exit reason based on EXIT_INFO
+                    let (reason, via) = EXIT_INFO.get()
+                        .map(|(r, v)| (r.clone(), v.clone()))
+                        .unwrap_or_else(|| ("abnormal".to_string(), "unknown".to_string()));
+                    
+                    // Emit rust_exit event FIRST (before flush)
+                    posthog_capture("rust_exit", serde_json::json!({
+                        "reason": reason,
+                        "via": via,
+                        "uptime_s": uptime_s,
+                    }));
+                    
+                    // Clear session marker (normal exit)
+                    if let Ok(app_data_dir) = _handle.path().app_data_dir() {
+                        let _ = session_marker::clear_session_marker(&app_data_dir);
+                    }
+                    
+                    // Now flush the queue (this will send rust_exit and any pending events)
+                    let _pending_flushed = analytics::flush_sync(std::time::Duration::from_secs(3));
                 }
                 _ => {}
             }
