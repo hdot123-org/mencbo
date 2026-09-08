@@ -200,7 +200,7 @@ fn posthog_capture(event: Event, mut props: serde_json::Value) {
     }
 
     // Enqueue to batch queue instead of spawning a new thread
-    analytics::enqueue(event, &install_id, props);
+    analytics::enqueue(event.as_str(), &install_id, props);
 }
 
 const PANEL_W: f64 = 360.0;
@@ -911,7 +911,7 @@ pub fn run() {
                                 // Use the shared transform helper — same shape as get_state
                                 let payload = read_and_transform_state(&path_clone);
                                 posthog_capture(
-                                    Event::StateSync,
+                                    analytics_events_gen::Event::StateSync,
                                     serde_json::json!({
                                         "tasks": payload["tasks"].as_array().map(|a| a.len()),
                                         "mock": payload["mock"].as_bool().unwrap_or(false),
