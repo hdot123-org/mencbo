@@ -287,7 +287,7 @@ describe("analytics identity injection", () => {
 
     // Capture an event BEFORE identity is ready (simulates App.tsx state_load race)
     capture("state_load", { tasks: 5, duration_ms: 10 });
-    capture("state_sync", { tasks: 5 });
+    capture("state_sync", { tasks: 5, mock: false });
 
     // Verify no events were sent yet (buffered)
     expect(posthog.capture).not.toHaveBeenCalledWith(
@@ -348,8 +348,8 @@ describe("analytics identity injection", () => {
     vi.mocked(posthog.capture).mockClear();
 
     // Capture same event twice in quick succession
-    capture("state_load", { tasks: 5 });
-    capture("state_load", { tasks: 5 });
+    capture("state_load", { tasks: 5, duration_ms: 10 });
+    capture("state_load", { tasks: 5, duration_ms: 10 });
 
     // Should only capture once (deduplication)
     const captureCalls = vi.mocked(posthog.capture).mock.calls;
@@ -372,13 +372,13 @@ describe("analytics identity injection", () => {
     vi.mocked(posthog.capture).mockClear();
 
     // Capture same event
-    capture("state_load", { tasks: 5 });
+    capture("state_load", { tasks: 5, duration_ms: 10 });
 
     // Wait 15ms
     await new Promise((resolve) => setTimeout(resolve, 15));
 
     // Capture same event again
-    capture("state_load", { tasks: 5 });
+    capture("state_load", { tasks: 5, duration_ms: 10 });
 
     // Should capture twice (outside dedup window)
     const captureCalls = vi.mocked(posthog.capture).mock.calls;
