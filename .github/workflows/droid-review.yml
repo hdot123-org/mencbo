@@ -46,7 +46,7 @@ jobs:
   # 校验，缺失即 run startup_failure 零 job）。授权集：contents: read +
   # actions: write + id-token: write + pull-requests: read。
   shards:
-    uses: hdot123-org/infra-core/.github/workflows/droid-review-shards.yml@v0.15.2
+    uses: hdot123-org/infra-core/.github/workflows/droid-review-shards.yml@v0.16.1
     permissions:
       contents: read
       actions: write
@@ -85,7 +85,7 @@ jobs:
       actions: read
     steps:
       - name: Aggregate and publish findings
-        uses: hdot123-org/infra-core/actions/droid-review-aggregate@v0.15.2
+        uses: hdot123-org/infra-core/actions/droid-review-aggregate@v0.16.1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           pr-number: ${{ needs.shards.outputs.pr_number }}
