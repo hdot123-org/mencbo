@@ -34,6 +34,15 @@ static STARTED_AT: OnceLock<std::time::Instant> = OnceLock::new();
 /// Architecture decision 4: rust_exit is the authoritative exit event.
 static EXIT_INFO: OnceLock<(String, String)> = OnceLock::new();
 
+/// Global flag for close_panel diagnostic test mode (fix-close-panel-test-hook).
+/// Set during setup if MENCBO_DIAG_TEST=close_panel.
+/// When true, the panel will be automatically closed 3s after becoming visible (one-shot).
+static CLOSE_PANEL_DIAG_MODE: OnceLock<bool> = OnceLock::new();
+
+/// One-shot flag to ensure close_panel only triggers once per session.
+/// Set to true after the first perform_close() call.
+static CLOSE_PANEL_TRIGGERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Heartbeat sequence counter (标准 §6.1, VAL-REL-006).
 /// Increments monotonically within session_id scope, resets on process restart.
 /// Used to detect missing events: gap ≥10 minutes without filling = lost events.
@@ -795,6 +804,58 @@ pub fn run() {
                 _ => {}
             });
 
+            // Close panel diagnostic test hook (fix-close-panel-test-hook, VAL-PAN-003)
+            // Spawns a thread that monitors panel visibility and calls perform_close() after 3s,
+            // triggering the real CloseRequested → panel_close{via:close} path.
+            // This is a one-shot operation per session.
+            if std::env::var("MENCBO_DIAG_TEST").map(|v| v == "close_panel").unwrap_or(false) {
+                let _ = CLOSE_PANEL_DIAG_MODE.set(true);
+                let panel_for_close = panel.clone();
+                std::thread::spawn(move || {
+                    use std::sync::atomic::Ordering;
+                    let mut checks_without_visible = 0;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        
+                        // Check if already triggered (one-shot)
+                        if CLOSE_PANEL_TRIGGERED.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        
+                        // Check if panel is visible
+                        if let Ok(is_visible) = panel_for_close.is_visible() {
+                            if is_visible {
+                                // Panel is visible, wait 3 seconds then perform_close
+                                std::thread::sleep(std::time::Duration::from_secs(3));
+                                
+                                // Double-check still visible and not already triggered
+                                if !CLOSE_PANEL_TRIGGERED.load(Ordering::SeqCst) {
+                                    if let Ok(still_visible) = panel_for_close.is_visible() {
+                                        if still_visible {
+                                            eprintln!("[diag] close_panel: triggering perform_close() after 3s visibility");
+                                            // perform_close() triggers the real CloseRequested event
+                                            // which will be handled by the WindowEvent::CloseRequested handler above
+                                            let _ = panel_for_close.close();
+                                            CLOSE_PANEL_TRIGGERED.store(true, Ordering::SeqCst);
+                                            break;
+                                        }
+                                    }
+                                }
+                                break;
+                            } else {
+                                // Panel not visible yet, increment counter
+                                checks_without_visible += 1;
+                                // Give up after 60 seconds (600 checks)
+                                if checks_without_visible > 600 {
+                                    eprintln!("[diag] close_panel: timeout waiting for panel visibility");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
             // File watcher for state.json → emit state-changed.
             // FIX 4: Watch the *parent directory* instead of the file itself.
             // - No pre-write: we must NEVER write to ~/.mencbo/state.json at startup
@@ -939,11 +1000,15 @@ pub fn run() {
 /// Reads MENCBO_DIAG_TEST env var and dispatches to fault injection logic.
 /// This is a skeleton for M4 feature - actual fault injection behavior will be filled in later.
 /// 
-/// Supported values: freeze_webview, block_main, slow_ipc, panic
+/// Supported values: freeze_webview, block_main, slow_ipc, panic, close_panel
 /// Only active in release builds (debug builds are gated by cfg!(debug_assertions)).
 /// 
 /// Feature attribution: fix-m1-review-findings (m1 scrutiny round 1 quality debt)
 /// Will be consumed by: watchdog-diagnostics (M4)
+/// 
+/// close_panel implementation (fix-close-panel-test-hook):
+/// Spawns a thread that monitors panel visibility and calls perform_close() after 3s,
+/// triggering the real CloseRequested → panel_close{via:close} path.
 #[allow(dead_code)]
 fn check_diag_test_hook() {
     // Only active in release builds
@@ -952,27 +1017,58 @@ fn check_diag_test_hook() {
     }
 
     if let Ok(diag_mode) = std::env::var("MENCBO_DIAG_TEST") {
-        match diag_mode.as_str() {
-            "freeze_webview" => {
-                // Skeleton: M4 will implement webview freeze injection
-                eprintln!("[diag] MENCBO_DIAG_TEST=freeze_webview detected (skeleton, no-op for now)");
-            }
-            "block_main" => {
-                // Skeleton: M4 will implement main thread block injection
-                eprintln!("[diag] MENCBO_DIAG_TEST=block_main detected (skeleton, no-op for now)");
-            }
-            "slow_ipc" => {
-                // Skeleton: M4 will implement slow IPC injection
-                eprintln!("[diag] MENCBO_DIAG_TEST=slow_ipc detected (skeleton, no-op for now)");
-            }
-            "panic" => {
-                // Skeleton: M4 will implement panic injection
-                eprintln!("[diag] MENCBO_DIAG_TEST=panic detected (skeleton, no-op for now)");
-            }
-            _ => {
-                // Unknown mode, ignore
+        if let Some(mode) = parse_diag_test_mode(&diag_mode) {
+            match mode {
+                DiagTestMode::FreezeWebview => {
+                    // Skeleton: M4 will implement webview freeze injection
+                    eprintln!("[diag] MENCBO_DIAG_TEST=freeze_webview detected (skeleton, no-op for now)");
+                }
+                DiagTestMode::BlockMain => {
+                    // Skeleton: M4 will implement main thread block injection
+                    eprintln!("[diag] MENCBO_DIAG_TEST=block_main detected (skeleton, no-op for now)");
+                }
+                DiagTestMode::SlowIpc => {
+                    // Skeleton: M4 will implement slow IPC injection
+                    eprintln!("[diag] MENCBO_DIAG_TEST=slow_ipc detected (skeleton, no-op for now)");
+                }
+                DiagTestMode::Panic => {
+                    // Skeleton: M4 will implement panic injection
+                    eprintln!("[diag] MENCBO_DIAG_TEST=panic detected (skeleton, no-op for now)");
+                }
+                DiagTestMode::ClosePanel => {
+                    // Implementation: spawn a thread that waits for panel visibility,
+                    // then calls perform_close() after 3s to trigger panel_close{via:close}
+                    eprintln!("[diag] MENCBO_DIAG_TEST=close_panel detected, will close panel after visibility");
+                }
             }
         }
+    }
+}
+
+/// Parse MENCBO_DIAG_TEST environment variable value into a typed enum.
+/// This is a pure function for testability (no env var access).
+/// 
+/// Returns Some(DiagTestMode) if the value is a known mode, None otherwise.
+/// Used by close_panel test hook and future M4 diagnostic features.
+#[derive(Debug, PartialEq, Clone)]
+#[allow(dead_code)]
+enum DiagTestMode {
+    FreezeWebview,
+    BlockMain,
+    SlowIpc,
+    Panic,
+    ClosePanel,
+}
+
+#[allow(dead_code)]
+fn parse_diag_test_mode(value: &str) -> Option<DiagTestMode> {
+    match value {
+        "freeze_webview" => Some(DiagTestMode::FreezeWebview),
+        "block_main" => Some(DiagTestMode::BlockMain),
+        "slow_ipc" => Some(DiagTestMode::SlowIpc),
+        "panic" => Some(DiagTestMode::Panic),
+        "close_panel" => Some(DiagTestMode::ClosePanel),
+        _ => None,
     }
 }
 
@@ -1492,6 +1588,85 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(conf).unwrap();
         assert_eq!(json["identifier"], "com.mencbo.desktop.dev");
         assert_ne!(json["identifier"], "com.mencbo.desktop");
+    }
+
+    // ---- MENCBO_DIAG_TEST parsing tests (fix-close-panel-test-hook) ----
+    // These tests verify the pure function that parses the env var value into
+    // a typed enum. The function is extracted for testability without env vars.
+
+    #[test]
+    fn parse_diag_test_mode_close_panel() {
+        // The new value close_panel must be recognized as a valid mode
+        let mode = parse_diag_test_mode("close_panel");
+        assert_eq!(mode, Some(DiagTestMode::ClosePanel), "close_panel must be recognized");
+    }
+
+    #[test]
+    fn parse_diag_test_mode_freeze_webview() {
+        // Existing value freeze_webview must still work (no regression)
+        let mode = parse_diag_test_mode("freeze_webview");
+        assert_eq!(mode, Some(DiagTestMode::FreezeWebview), "freeze_webview must still be recognized");
+    }
+
+    #[test]
+    fn parse_diag_test_mode_block_main() {
+        let mode = parse_diag_test_mode("block_main");
+        assert_eq!(mode, Some(DiagTestMode::BlockMain), "block_main must still be recognized");
+    }
+
+    #[test]
+    fn parse_diag_test_mode_slow_ipc() {
+        let mode = parse_diag_test_mode("slow_ipc");
+        assert_eq!(mode, Some(DiagTestMode::SlowIpc), "slow_ipc must still be recognized");
+    }
+
+    #[test]
+    fn parse_diag_test_mode_panic() {
+        let mode = parse_diag_test_mode("panic");
+        assert_eq!(mode, Some(DiagTestMode::Panic), "panic must still be recognized");
+    }
+
+    #[test]
+    fn parse_diag_test_mode_unknown_returns_none() {
+        // Unknown values must return None (not panic, not silently succeed)
+        let mode = parse_diag_test_mode("unknown_value");
+        assert_eq!(mode, None, "Unknown mode must return None");
+    }
+
+    #[test]
+    fn parse_diag_test_mode_empty_string_returns_none() {
+        // Empty string must return None
+        let mode = parse_diag_test_mode("");
+        assert_eq!(mode, None, "Empty string must return None");
+    }
+
+    #[test]
+    fn parse_diag_test_mode_case_sensitive() {
+        // Modes are case-sensitive (CLOSE_PANEL should not match)
+        let mode = parse_diag_test_mode("CLOSE_PANEL");
+        assert_eq!(mode, None, "Mode names must be case-sensitive");
+    }
+
+    #[test]
+    fn parse_diag_test_mode_all_five_values_distinct() {
+        // All five values must produce distinct enum variants
+        let modes = vec![
+            parse_diag_test_mode("freeze_webview"),
+            parse_diag_test_mode("block_main"),
+            parse_diag_test_mode("slow_ipc"),
+            parse_diag_test_mode("panic"),
+            parse_diag_test_mode("close_panel"),
+        ];
+        
+        // All must be Some
+        assert!(modes.iter().all(|m| m.is_some()), "All five modes must parse successfully");
+        
+        // All must be distinct (no two modes are equal)
+        for i in 0..modes.len() {
+            for j in (i + 1)..modes.len() {
+                assert_ne!(modes[i], modes[j], "Mode {} and {} must be distinct", i, j);
+            }
+        }
     }
 
     // ---- identity_payload tests (fix-sentinel-rust-tests) ----

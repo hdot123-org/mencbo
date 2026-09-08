@@ -334,3 +334,37 @@ Dev 构建使用独立 `app_data_dir`（`com.mencbo.desktop.dev`），`install_i
 3. 仅 JS 侧事件（携带 `identity_degraded: true`）会到达 PostHog，用于诊断 IO 故障
 
 **注意**：此机制假设 `app_data_dir` 在 degraded 模式下仍可写（用于 session marker）。若 `app_data_dir` 本身不可访问，dirty exit 检测也会失效（marker 无法写入/读取），但这是极端边缘场景（磁盘满/权限损坏），不在当前缓解范围内。
+
+---
+
+## 诊断测试钩子（Diagnostic Test Hooks）
+
+为验证特定场景（如面板关闭、webview 假死等），系统支持通过环境变量 `MENCBO_DIAG_TEST` 触发诊断测试模式。这些钩子**仅用于验证**，不应在生产环境使用。
+
+### 使用方法
+
+在启动应用时设置环境变量：
+
+```bash
+MENCBO_DIAG_TEST=<hook_name> pnpm -F desktop-client tauri dev
+```
+
+### 可用钩子
+
+| 值 | 用途 | 说明 |
+|----|------|------|
+| `close_panel` | 自动关闭面板 | 面板首次可见后 3 秒触发 `perform_close()`，产生真实的 CloseRequested 事件链（→ `panel_close{via:close}`）。单次触发即止，用于验证 VAL-PAN-003。 |
+| `freeze_webview` | Webview 假死模拟 | （预留，M4 watchdog 阶段实现） |
+| `block_main` | 主线程阻塞模拟 | （预留，M4 watchdog 阶段实现） |
+| `slow_ipc` | IPC 延迟模拟 | （预留，M4 watchdog 阶段实现） |
+| `panic` | Panic 触发 | （预留，M4 watchdog 阶段实现） |
+
+### 示例
+
+```bash
+# 验证面板关闭事件（VAL-PAN-003）
+MENCBO_DIAG_TEST=close_panel pnpm -F desktop-client tauri dev
+```
+
+**注意**：诊断钩子仅在 release 构建或显式启用时生效，debug 构建默认忽略这些环境变量。
+
