@@ -27,9 +27,12 @@ const WHITELIST = new Set([
   "lib/__tests__/analytics.test.ts",
 ]);
 
-// Pattern: matches  from "posthog-js"  or  import("posthog-js")
+// Pattern: matches three forms of posthog-js import:
+// 1. Static imports: from "posthog-js" or from "posthog-js/react" (subpath)
+// 2. Dynamic imports: import("posthog-js") or import("posthog-js/...")
+// 3. Bare side-effect imports: import "posthog-js" (no from keyword)
 const POSTHOG_IMPORT_RE =
-  /(?:from\s+["']posthog-js["']|import\s*\(\s*["']posthog-js["']\s*\))/;
+  /(?:from\s+["']posthog-js(?:\/[^"']*)?["']|import\s*\(\s*["']posthog-js(?:\/[^"']*)?["']\s*\)|^\s*import\s+["']posthog-js(?:\/[^"']*)?["'])/;
 
 async function* walkTsFiles(dir) {
   const entries = await readdir(dir, { withFileTypes: true });

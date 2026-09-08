@@ -94,7 +94,7 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 | Event | Layer | Trigger | Properties |
 |-------|-------|---------|------------|
 | `rust_launch` | rust | Process startup | `version` |
-| `rust_exit` | rust | Process exit | `reason: normal\|dirty\|abnormal`, `via: command\|tray_menu\|unknown`, `uptime_s` |
+| `rust_exit` | rust | Process exit | `reason: normal\|dirty\|abnormal`, `via: command\|tray_menu\|system`, `uptime_s` |
 | `rust_heartbeat` | rust | Every 5 min | `seq` (monotonic within session, resets on restart) |
 | `js_launch` | webview | Webview init | — |
 | `js_heartbeat` | webview | Every 5 min (visible period only) | `uptime_sec`, `seq` (monotonic within visible window, resets on context rebuild) |
