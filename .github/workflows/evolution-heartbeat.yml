@@ -21,7 +21,7 @@ permissions:
 jobs:
   heartbeat:
     # INFRA-651: reusable 引用钉 tag，与引擎版本对齐
-    uses: hdot123-org/infra-core/.github/workflows/evolution-heartbeat.yml@v0.15.1
+    uses: hdot123-org/infra-core/.github/workflows/evolution-heartbeat.yml@v0.15.2
     permissions:
       contents: read
       issues: write
