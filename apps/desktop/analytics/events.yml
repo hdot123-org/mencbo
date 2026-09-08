@@ -41,8 +41,10 @@ events:
     status: active
     props:
       reason: string  # normal | dirty | abnormal
-      via: string     # command | tray_menu | unknown
+      via: string     # command | tray_menu | system | unknown
       uptime_s: number
+      prev_session_id: string  # dirty path only: previous session's session_id
+      pending_flushed: boolean  # normal path only: result of flush_sync before exit
     description: Process exit event (architecture decision 4: rust 权威退出事件)
 
   rust_heartbeat:
@@ -68,20 +70,20 @@ events:
 
   # === Panel Events ===
   panel_open:
-    layer: both
+    layer: rust
     status: active
     props:
       via: string  # tray
       panel_id: string  # Unique panel instance ID (session_id)
-    description: Panel shown
+    description: Panel shown (Rust single source since #52)
 
   panel_close:
-    layer: both
+    layer: rust
     status: active
     props:
       via: string  # tray | blur | close
       panel_id: string  # Unique panel instance ID (session_id)
-    description: Panel hidden
+    description: Panel hidden (Rust single source since #52)
 
   # === State Management ===
   state_load:

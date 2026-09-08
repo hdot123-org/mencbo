@@ -324,6 +324,27 @@ fn next_backoff(current_secs: u64) -> u64 {
     std::cmp::min(current_secs.saturating_mul(2), MAX_BACKOFF_SECS)
 }
 
+/// Compute backoff with jitter to prevent thundering herd.
+/// Returns a duration in the range [delay * 0.5, delay * 1.0]
+fn next_backoff_with_jitter(delay_secs: u64) -> u64 {
+    let mut random_bytes = [0u8; 8];
+    getrandom::getrandom(&mut random_bytes).unwrap_or_else(|_| {
+        // Fallback: use system time if getrandom fails
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .subsec_nanos() as u64;
+        random_bytes = nanos.to_le_bytes();
+    });
+    
+    // Convert to u64 and get a value in [0.0, 1.0)
+    let random_u64 = u64::from_le_bytes(random_bytes);
+    let jitter_factor = (random_u64 % 5000) as f64 / 10000.0; // [0.0, 0.5)
+    
+    let jittered = delay_secs as f64 * (0.5 + jitter_factor);
+    jittered.round() as u64
+}
+
 /// Check whether flush conditions are met.
 fn should_flush(entry_count: usize, elapsed_since_last_flush: Duration) -> bool {
     entry_count >= FLUSH_THRESHOLD
@@ -410,8 +431,8 @@ fn flush_loop(inner: Arc<Inner>) {
                 }
                 drop(state);
 
-                // Exponential backoff sleep
-                std::thread::sleep(Duration::from_secs(backoff_secs));
+                // Exponential backoff with jitter
+                std::thread::sleep(Duration::from_secs(next_backoff_with_jitter(backoff_secs)));
                 backoff_secs = next_backoff(backoff_secs);
             }
         }
@@ -815,5 +836,45 @@ mod tests {
         let ts1 = &state.entries[0].timestamp;
         let ts2 = &state.entries[1].timestamp;
         assert!(ts2 >= ts1, "timestamps should preserve chronological order");
+    }
+
+    // ── Jitter tests (标准 §7, TDD RED phase) ──
+
+    #[test]
+    fn jitter_within_bounds() {
+        // For a delay of 10s, jittered value should be in [5, 10]
+        let delay = 10u64;
+        for _ in 0..100 {
+            let jittered = next_backoff_with_jitter(delay);
+            assert!(
+                jittered >= delay / 2 && jittered <= delay,
+                "jittered value {} should be in [{}, {}]",
+                jittered,
+                delay / 2,
+                delay
+            );
+        }
+    }
+
+    #[test]
+    fn jitter_with_zero_delay() {
+        // Zero delay should return zero
+        let jittered = next_backoff_with_jitter(0);
+        assert_eq!(jittered, 0);
+    }
+
+    #[test]
+    fn jitter_distribution_varies() {
+        // Run 1000 iterations and verify we get at least 2 different values
+        let delay = 10u64;
+        let mut results = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            results.insert(next_backoff_with_jitter(delay));
+        }
+        assert!(
+            results.len() > 1,
+            "jitter should produce varied results, got only {} unique values",
+            results.len()
+        );
     }
 }

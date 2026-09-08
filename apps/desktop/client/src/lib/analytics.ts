@@ -30,7 +30,7 @@ const heartbeatSeqHelper = createHeartbeatSeq();
 // and flushed in order once register() completes (fixes session_id race).
 const eventBuffer: Array<{ event: string; props?: Record<string, unknown> }> = [];
 
-// Deduplication guard: prevents same event from firing twice within 1ms
+// Deduplication guard: prevents same event from firing twice within 10ms
 // Fixes state_load double-fire issue observed in production
 const recentCaptures = new Map<string, number>();
 
