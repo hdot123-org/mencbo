@@ -768,11 +768,15 @@ pub fn run() {
             let panel_for_blur = panel.clone();
             panel.on_window_event(move |e| match e {
                 WindowEvent::Focused(false) => {
-                    let _ = panel_for_blur.hide();
-                    posthog_capture("panel_close", serde_json::json!({ 
-                        "via": "blur",
-                        "panel_id": get_panel_id(),
-                    }));
+                    // Guard: only emit panel_close if panel is actually visible
+                    // Prevents double-send when tray already closed the panel
+                    if panel_for_blur.is_visible().unwrap_or(false) {
+                        let _ = panel_for_blur.hide();
+                        posthog_capture("panel_close", serde_json::json!({ 
+                            "via": "blur",
+                            "panel_id": get_panel_id(),
+                        }));
+                    }
                 }
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
@@ -902,14 +906,14 @@ pub fn run() {
                     
                     // Flush pending events first, then enqueue rust_exit
                     // Flush queue to send all pending events
-                    let _ = analytics::flush_sync(std::time::Duration::from_secs(3));
+                    let pending_flushed = analytics::flush_sync(std::time::Duration::from_secs(3));
                     
                     // Now enqueue rust_exit with the flush status
                     posthog_capture("rust_exit", serde_json::json!({
                         "reason": reason,
                         "via": via,
                         "uptime_s": uptime_s,
-                        "pending_flushed": true,
+                        "pending_flushed": pending_flushed,
                     }));
                     
                     // Final flush to send rust_exit itself

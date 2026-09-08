@@ -94,10 +94,18 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 | Event | Layer | Trigger | Properties |
 |-------|-------|---------|------------|
 | `rust_launch` | rust | Process startup | `version` |
-| `rust_exit` | rust | Process exit | `via: command\|tray_menu` |
+| `rust_exit` | rust | Process exit | `reason: normal\|dirty\|abnormal`, `via: command\|tray_menu\|unknown`, `uptime_s` |
 | `rust_heartbeat` | rust | Every 5 min | `seq` (monotonic within session, resets on restart) |
 | `js_launch` | webview | Webview init | — |
 | `js_heartbeat` | webview | Every 5 min | `uptime_sec`, `seq` (monotonic within session, resets on restart) |
+
+**Heartbeat sequence gap detection**: Both heartbeats carry a monotonic `seq` counter (starts at 0, increments each emission within the session). A gap where `seq[n+1] - seq[n] > 1` combined with a timestamp gap ≥10 minutes indicates genuine event loss, distinguishing it from normal batching delays (<2 min). See §6.1 for HogQL detection query.
+
+**Exit event semantics (architecture decision 4)**:
+- **Normal exit** (`reason: normal`): Triggered by user-initiated quit (tray menu, window close). Rust clears the session marker, emits `rust_exit` with `uptime_s` (seconds since launch), and performs synchronous flush (≤3s timeout).
+- **Dirty exit** (`reason: dirty`): Detected on next startup when a session marker from a previous session is found (indicating crash/SIGKILL). Rust emits `rust_exit` for the **previous** session with `prev_session_id` and estimated `uptime_s` (calculated from marker's `started_at` timestamp). This reconstructs the missing exit event.
+- **Abnormal exit** (`reason: abnormal`): Reserved for future use (e.g., panic hook). Currently not emitted; dirty exit detection handles crash recovery.
+- **SIGTERM/SIGKILL**: Always treated as dirty exit. No signal handler is installed (architecture decision: release builds use `panic="abort"`, preventing in-process signal handling). The killed session's marker file remains; the next startup detects it and emits the dirty exit event.
 
 ### Panel Events
 
@@ -158,7 +166,6 @@ All panel events include `panel_id` (derived from session_id) for correlation ac
 
 | Event | Layer | Trigger | Properties |
 |-------|-------|---------|------------|
-| `rust_exit` (enhanced) | rust | Normal/dirty exit | `reason: normal\|dirty`, `uptime_s`, `prev_session_id` |
 | `diag_webview_unresponsive` | rust | Watchdog: webview hang | `missed_js_beats`, `threshold_s` |
 | `diag_webview_recovered` | rust | Watchdog: recovery | `freeze_duration_ms` |
 | `diag_webview_terminated` | rust | Watchdog: webview crash | — |
@@ -298,3 +305,25 @@ Dev 构建使用独立 `app_data_dir`（`com.mencbo.desktop.dev`），`install_i
 - 二次启动同 identifier 产物（PID 41311）→ 5s 后 PID 41311 已退出
 - 仅剩 1 个 `desktop-client` 进程（原始实例）
 - 清理：`kill 41105`，验证无残留
+
+---
+
+## 已知限制（Known Limitations）
+
+### Exit-flush HTTP 竞态（结构性，M4 watchdog 期处理）
+
+`RunEvent::Exit` 中 `flush_sync` 调用受 3s 超时约束。若网络延迟或 PostHog 端点响应缓慢，部分事件可能在进程终止前未完成发送。这是结构性限制：进程退出时序与 HTTP 请求的竞态无法在用户态完全消除。
+
+**当前缓解**：两次 `flush_sync` 调用（先 flush pending，再 flush `rust_exit` 本身），总预算 ≤6s。
+**长期方案**：M4 watchdog 诊断（`diag_exit_flush_failed`）将捕获 flush 失败并记录，便于后续优化（如本地持久化队列）。
+
+### Degraded 安装的 session_id 哨兵语义
+
+当 `install_id` IO 失败（`get_or_create_install_id` 返回错误），identity 被设置为哨兵值 `"analytics-disabled"`，`analytics_identity` bridge 返回 `degraded: true`。JS 侧跳过 bootstrap，所有事件携带 `identity_degraded: true`。
+
+**语义**：同一 degraded 安装的所有会话共享 `distinct_id = "analytics-disabled"`，但这不会导致 person 合并问题，因为：
+1. JS 侧不 bootstrap（避免 `posthog.init` 将 `"analytics-disabled"` 作为真实 distinct_id 持久化）
+2. Rust 侧 `posthog_capture` 在检测到 `"analytics-disabled"` 时直接 no-op（不发送任何事件）
+3. 仅 JS 侧事件（携带 `identity_degraded: true`）会到达 PostHog，用于诊断 IO 故障
+
+**注意**：此机制假设 `app_data_dir` 在 degraded 模式下仍可写（用于 session marker）。若 `app_data_dir` 本身不可访问，dirty exit 检测也会失效（marker 无法写入/读取），但这是极端边缘场景（磁盘满/权限损坏），不在当前缓解范围内。
