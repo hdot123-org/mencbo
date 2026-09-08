@@ -332,6 +332,29 @@ fn get_state() -> Result<Value, String> {
     Ok(read_and_transform_state(&path))
 }
 
+/// Pure function that builds the analytics_identity response payload.
+/// Extracted from the `analytics_identity` tauri command for testability
+/// (same pattern as `enqueue_inner` from rel-batch-queue #48).
+///
+/// This function does NOT depend on tauri runtime or global state —
+/// it takes install_id and session_id as parameters and returns the
+/// JSON payload that the command sends to the JS side.
+///
+/// **Degraded mode detection**: If `install_id` equals the sentinel
+/// `"analytics-disabled"` (set when install_id IO failed at startup),
+/// the `degraded` field is `true`. JS side must skip bootstrap and
+/// mark events with `identity_degraded: true` in this case.
+fn identity_payload(install_id: &str, session_id: &str) -> Value {
+    let degraded = install_id == "analytics-disabled";
+    serde_json::json!({
+        "installId": install_id,
+        "sessionId": session_id,
+        "platform": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "degraded": degraded,
+    })
+}
+
 /// Return the analytics identity (install_id + session_id) for JS-side bootstrap.
 /// This is the bridge command that the webview invokes to get the persistent
 /// install_id and the per-launch session_id from the Rust authority.
@@ -350,16 +373,7 @@ fn analytics_identity() -> Result<Value, String> {
         .get()
         .ok_or_else(|| "Identity not initialized".to_string())?;
     
-    // Detect degraded mode: sentinel values indicate install_id IO failure
-    let degraded = install_id == "analytics-disabled";
-    
-    Ok(serde_json::json!({
-        "installId": install_id,
-        "sessionId": session_id,
-        "platform": std::env::consts::OS,
-        "arch": std::env::consts::ARCH,
-        "degraded": degraded,
-    }))
+    Ok(identity_payload(install_id, session_id))
 }
 
 #[tauri::command]
@@ -1468,5 +1482,65 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(conf).unwrap();
         assert_eq!(json["identifier"], "com.mencbo.desktop.dev");
         assert_ne!(json["identifier"], "com.mencbo.desktop");
+    }
+
+    // ---- identity_payload tests (fix-sentinel-rust-tests) ----
+    // These tests verify the pure function that builds the analytics_identity response.
+    // The function is extracted to be testable without tauri runtime (following the
+    // pattern of enqueue_inner from rel-batch-queue).
+
+    #[test]
+    fn identity_payload_normal_install_id_returns_degraded_false() {
+        // Normal path: install_id is a real desktop-{uuidv4} value
+        // Expected: degraded=false, all fields present
+        let install_id = "desktop-a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+        let session_id = "0192f3a4-5b6c-7d8e-9f0a-1b2c3d4e5f6a";
+        
+        let payload = identity_payload(install_id, session_id);
+        
+        // degraded must be false for normal install_id
+        assert_eq!(payload["degraded"], false, "Normal install_id must have degraded=false");
+        
+        // All required fields must be present
+        assert_eq!(payload["installId"], install_id);
+        assert_eq!(payload["sessionId"], session_id);
+        assert!(payload["platform"].is_string(), "platform must be present");
+        assert!(payload["arch"].is_string(), "arch must be present");
+    }
+
+    #[test]
+    fn identity_payload_sentinel_install_id_returns_degraded_true() {
+        // Degraded path: install_id is the "analytics-disabled" sentinel
+        // This happens when install_id IO failed at startup (fix-sentinel-degraded-flag)
+        // Expected: degraded=true, sentinel values preserved
+        let install_id = "analytics-disabled";
+        let session_id = "analytics-disabled";
+        
+        let payload = identity_payload(install_id, session_id);
+        
+        // degraded must be true for sentinel install_id
+        assert_eq!(payload["degraded"], true, "Sentinel install_id must have degraded=true");
+        
+        // Sentinel values must be preserved (not transformed)
+        assert_eq!(payload["installId"], "analytics-disabled");
+        assert_eq!(payload["sessionId"], "analytics-disabled");
+        
+        // Platform/arch must still be present (they come from std::env::consts)
+        assert!(payload["platform"].is_string(), "platform must be present even in degraded mode");
+        assert!(payload["arch"].is_string(), "arch must be present even in degraded mode");
+    }
+
+    #[test]
+    fn identity_payload_is_pure_function() {
+        // Verify that identity_payload is a pure function:
+        // same inputs → same outputs, no side effects
+        let install_id = "desktop-test-uuid";
+        let session_id = "session-test-uuid";
+        
+        let payload1 = identity_payload(install_id, session_id);
+        let payload2 = identity_payload(install_id, session_id);
+        
+        // Both calls must return identical results
+        assert_eq!(payload1, payload2, "Pure function must return same output for same input");
     }
 }
