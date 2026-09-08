@@ -209,6 +209,23 @@ export async function initAnalytics() {
     capture("js_unhandled_rejection", { reason: String(e.reason).slice(0, 300) }),
   );
 
+  // JS watchdog heartbeat (15s). Calls Rust heartbeat_ping command to prove webview responsiveness.
+  // The Rust watchdog thread checks this every 5s with 45s threshold, requires 2 consecutive timeouts.
+  // Visibility-aware: only sends when panel is visible (macOS App Nap suspends hidden webviews).
+  // Compare with rust_heartbeat in PostHog: if rust keeps flowing while js_heartbeat_ping gaps,
+  // the hang is in the webview layer (VAL-DIAG-001).
+  window.setInterval(() => {
+    if (analyticsReady) {
+      // Check if document is visible (macOS App Nap suspends hidden webviews)
+      if (document.visibilityState === "visible") {
+        invoke("heartbeat_ping").catch((e) => {
+          // Log error but don't crash - watchdog will detect missed beats
+          console.warn("[watchdog] heartbeat_ping failed:", e);
+        });
+      }
+    }
+  }, 15 * 1000);
+
   // JS heartbeat (5 min). Compare with rust_heartbeat in PostHog: if rust
   // keeps flowing while js gaps, the hang is in the webview layer.
   // VAL-REL-006: Heartbeat sequence counter (monotonic, resets on restart)
