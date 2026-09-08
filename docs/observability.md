@@ -165,18 +165,31 @@ All panel events include `panel_id` (derived from session_id) for correlation ac
 | `js_unhandled_rejection` | webview | Unhandled rejection | `reason` |
 | `diag_identity_failed` | webview | Identity bootstrap failed | `reason` |
 
+### Diagnostic Events (M4 Watchdog — Implemented)
+
+> These events are emitted by the watchdog state machine (watchdog.rs). Only state transitions produce events (not repeated per check cycle).
+
+| Event | Layer | Trigger | Properties |
+|-------|-------|---------|------------|
+| `diag_webview_unresponsive` | rust | Webview hang detected (2 consecutive 5s checks with stale JS heartbeat) | `missed_js_beats`, `threshold_s`, `error_code: E_WEBVIEW_UNRESPONSIVE` |
+| `diag_webview_recovered` | rust | Webview recovered from hang | `freeze_duration_ms`, `error_code: E_WEBVIEW_RECOVERED` |
+| `diag_native_main_unresponsive` | rust | Main thread probe timeout (>10s without run_on_main_thread response) | `stalled_ms`, `error_code: E_MAIN_THREAD_UNRESPONSIVE` |
+| `diag_ipc_timeout` | webview | JS invoke() exceeded timeout threshold | `error_code: E_IPC_TIMEOUT`, `timeout_ms` |
+| `diag_rust_panic` | rust | Panic hook fires (sync send via blocking reqwest) | `message`, `backtrace`, `error_code: E_RUST_PANIC` |
+
+**Watchdog false-positive protections (2026-09-09 fix)**:
+- **Sleep/wake safety**: Main thread probe uses monotonic `Instant` (not `SystemTime`), so system sleep doesn't produce false `diag_native_main_unresponsive`. Sleep/wake detection runs BEFORE native gate in `check_and_transition`, resetting all state.
+- **Visibility grace period**: `set_visibility(true)` resets `last_heartbeat` to now, preventing false `diag_webview_unresponsive`+`recovered` pairs after hide→show cycles.
+
+**Session marker semantics**: The session marker (for dirty exit detection) is a single-slot file — N consecutive kills only attribute to the most recent session (each new startup overwrites the marker; only the last unclean session's `prev_session_id` is reported).
+
 ### Planned Events (v1.1 Standard)
 
 > Not yet implemented. Tracked for future milestones.
 
 | Event | Layer | Trigger | Properties |
 |-------|-------|---------|------------|
-| `diag_webview_unresponsive` | rust | Watchdog: webview hang | `missed_js_beats`, `threshold_s` |
-| `diag_webview_recovered` | rust | Watchdog: recovery | `freeze_duration_ms` |
-| `diag_webview_terminated` | rust | Watchdog: webview crash | — |
-| `diag_native_main_unresponsive` | rust | Main thread probe timeout | — |
-| `diag_ipc_timeout` | webview | Tauri invoke timeout | `error_code`, `timeout_ms` |
-| `diag_rust_panic` | rust | Panic hook | `message`, `backtrace` |
+| `diag_webview_terminated` | rust | Watchdog: webview crash/termination | — |
 | `app_update_downloaded` | rust | Update binary downloaded | `version`, `source` |
 
 ---
@@ -354,10 +367,10 @@ MENCBO_DIAG_TEST=<hook_name> pnpm -F desktop-client tauri dev
 | 值 | 用途 | 说明 |
 |----|------|------|
 | `close_panel` | 自动关闭面板 | 面板首次可见后 3 秒触发 `perform_close()`，产生真实的 CloseRequested 事件链（→ `panel_close{via:close}`）。单次触发即止，用于验证 VAL-PAN-003。 |
-| `freeze_webview` | Webview 假死模拟 | （预留，M4 watchdog 阶段实现） |
-| `block_main` | 主线程阻塞模拟 | （预留，M4 watchdog 阶段实现） |
-| `slow_ipc` | IPC 延迟模拟 | （预留，M4 watchdog 阶段实现） |
-| `panic` | Panic 触发 | （预留，M4 watchdog 阶段实现） |
+| `freeze_webview` | Webview 假死模拟 | JS 侧 setInterval 死循环 60s+，阻止 JS heartbeat 更新 → 触发 `diag_webview_unresponsive` |
+| `block_main` | 主线程阻塞模拟 | 主线程 sleep 阻塞 >10s，阻止 run_on_main_thread probe 更新 → 触发 `diag_native_main_unresponsive` |
+| `slow_ipc` | IPC 延迟模拟 | command 执行超时 → 触发 `diag_ipc_timeout` |
+| `panic` | Panic 触发 | 故意 panic → 触发 `diag_rust_panic`（同步直发 PostHog） |
 
 ### 示例
 
