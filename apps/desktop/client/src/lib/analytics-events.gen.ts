@@ -35,6 +35,7 @@ export interface AppEventMap {
   };
   diag_native_main_unresponsive: {
     error_code: string;
+    stalled_ms: number;
   };
   diag_rust_panic: {
     backtrace: string;

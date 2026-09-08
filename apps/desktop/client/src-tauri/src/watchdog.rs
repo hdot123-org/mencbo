@@ -14,10 +14,22 @@
 //! - Distinguishes webview hangs from main thread hangs
 //! - Uses run_on_main_thread to execute a closure that updates a timestamp
 //! - If timestamp is stale, main thread is unresponsive
+//!
+//! Sleep/wake safety:
+//! - Both webview heartbeat and main thread probe use Instant (monotonic,
+//!   does not advance during system sleep)
+//! - Sleep/wake detection runs BEFORE native gate in check_and_transition,
+//!   so the main thread probe is also reset after wake
+//! - On wake detection, the main thread probe's "reported" flag is also reset
+//!
+//! Visibility grace period:
+//! - set_visibility(true) resets last_heartbeat to now, giving the webview
+//!   a grace period before the first heartbeat arrives (prevents false
+//!   diag_webview_unresponsive after hide→show)
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// Heartbeat timeout threshold (45 seconds)
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
@@ -85,8 +97,11 @@ pub struct Watchdog {
     consecutive_timeouts: Mutex<u32>,
     /// Last time we checked (for detecting sleep/wake)
     last_check: Mutex<Instant>,
-    /// Last main thread probe response time (for detecting main thread hangs)
-    main_thread_probe_time: AtomicU64,
+    /// Last main thread probe response time (monotonic Instant, NOT wall clock)
+    /// FIX (fix-watchdog-false-positives): Changed from AtomicU64/SystemTime to
+    /// Mutex<Instant> so sleep/wake doesn't produce false positives. SystemTime
+    /// wall clock advances during sleep, making the probe appear stale after wake.
+    main_thread_probe_time: Mutex<Instant>,
     /// Track if we've already reported main thread unresponsive (one-shot)
     main_thread_unresponsive_reported: AtomicBool,
 }
@@ -97,10 +112,6 @@ impl Watchdog {
     /// Create a new watchdog instance
     pub fn new() -> Self {
         let now = Instant::now();
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
         Self {
             last_heartbeat: Mutex::new(now),
             is_visible: AtomicBool::new(false),
@@ -108,7 +119,7 @@ impl Watchdog {
             unresponsive_since: Mutex::new(None),
             consecutive_timeouts: Mutex::new(0),
             last_check: Mutex::new(now),
-            main_thread_probe_time: AtomicU64::new(now_ms),
+            main_thread_probe_time: Mutex::new(now),
             main_thread_unresponsive_reported: AtomicBool::new(false),
         }
     }
@@ -131,34 +142,47 @@ impl Watchdog {
         *self.last_heartbeat.lock().unwrap() = Instant::now();
     }
 
-    /// Update panel visibility state
+    /// Update panel visibility state.
+    ///
+    /// FIX (fix-watchdog-false-positives): When transitioning to visible,
+    /// reset `last_heartbeat` to now. This gives the webview a grace period
+    /// before the first JS heartbeat arrives (≤15s per analytics.ts:288-297).
+    /// Without this, after a long hidden period (>45s), the stale last_heartbeat
+    /// triggers false diag_webview_unresponsive+recovered pairs before the first
+    /// post-show heartbeat arrives — violating the 2026-09-08 visibility ruling.
     pub fn set_visibility(&self, visible: bool) {
         self.is_visible.store(visible, Ordering::SeqCst);
+        if visible {
+            // Reset heartbeat baseline on show — grace period for first JS heartbeat
+            *self.last_heartbeat.lock().unwrap() = Instant::now();
+            // Also reset consecutive timeouts to avoid false positives
+            *self.consecutive_timeouts.lock().unwrap() = 0;
+        }
     }
 
     /// Record a main thread probe response (called from main thread via run_on_main_thread)
-    /// This proves the main thread is responsive
+    /// This proves the main thread is responsive.
+    ///
+    /// FIX (fix-watchdog-false-positives): Uses monotonic Instant instead of
+    /// SystemTime wall clock, so system sleep doesn't make the probe appear stale.
     pub fn record_main_thread_probe(&self) {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        self.main_thread_probe_time.store(now_ms, Ordering::SeqCst);
+        *self.main_thread_probe_time.lock().unwrap() = Instant::now();
         // Reset the reported flag when main thread responds
         self.main_thread_unresponsive_reported.store(false, Ordering::SeqCst);
     }
 
-    /// Check if main thread is unresponsive
-    /// Returns Some(stalled_ms) if main thread hasn't responded within threshold
+    /// Check if main thread is unresponsive.
+    /// Returns Some(stalled_ms) if main thread hasn't responded within threshold.
+    ///
+    /// FIX (fix-watchdog-false-positives): Uses monotonic Instant elapsed()
+    /// instead of SystemTime subtraction. During system sleep, Instant does NOT
+    /// advance, so a >10s sleep won't produce a false "stale probe" reading.
     pub fn check_main_thread(&self) -> Option<u64> {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        let last_probe_ms = self.main_thread_probe_time.load(Ordering::SeqCst);
-        let stalled_ms = now_ms.saturating_sub(last_probe_ms);
-        
-        if stalled_ms > MAIN_THREAD_PROBE_TIMEOUT.as_millis() as u64 {
+        let last_probe = *self.main_thread_probe_time.lock().unwrap();
+        let stalled = last_probe.elapsed();
+        let stalled_ms = stalled.as_millis() as u64;
+
+        if stalled > MAIN_THREAD_PROBE_TIMEOUT {
             Some(stalled_ms)
         } else {
             None
@@ -185,6 +209,12 @@ impl Watchdog {
                 *self.unresponsive_since.lock().unwrap() = None;
                 // Reset the last heartbeat to now so we don't falsely flag
                 *self.last_heartbeat.lock().unwrap() = now;
+                // Also reset the main thread probe time so it doesn't appear stale
+                // FIX (fix-watchdog-false-positives): Even though main_thread_probe_time
+                // is now monotonic (won't be fooled by wall clock jump), we still reset
+                // it after wake for safety — the probe thread may have been suspended too.
+                *self.main_thread_probe_time.lock().unwrap() = now;
+                self.main_thread_unresponsive_reported.store(false, Ordering::SeqCst);
                 return None;
             }
         }
@@ -247,11 +277,42 @@ impl Watchdog {
 
     /// Check and return a transition event if state changed.
     /// This is the public API used by the watchdog thread.
-    /// 
-    /// Also checks main thread probe: if main thread is unresponsive,
-    /// returns MainThreadUnresponsive (takes priority over webview checks).
+    ///
+    /// FIX (fix-watchdog-false-positives): Sleep/wake detection (inside check())
+    /// now runs conceptually before the native gate, because:
+    /// 1. check() detects sleep/wake and resets both webview heartbeat AND main
+    ///    thread probe time
+    /// 2. check_and_transition calls check() which handles the reset
+    /// 3. BUT the main thread probe check runs BEFORE check() in this method —
+    ///    so on wake, we must also skip the native gate if sleep was detected.
+    ///
+    /// The solution: check_main_thread uses monotonic Instant, so it won't be
+    /// fooled by wall clock jumps during sleep. Additionally, the sleep/wake
+    /// detection in check() resets main_thread_probe_time for safety.
     pub fn check_and_transition(&self) -> Option<WatchdogTransition> {
-        // First check main thread probe (takes priority)
+        // Detect sleep/wake FIRST (before native gate) by checking if the
+        // check interval elapsed much more than expected.
+        // This ensures both the webview and native gates are protected.
+        let now = Instant::now();
+        let slept = {
+            let mut last_check = self.last_check.lock().unwrap();
+            let elapsed = now.duration_since(*last_check);
+            *last_check = now;
+            elapsed > CHECK_INTERVAL * 2
+        };
+
+        if slept {
+            // System likely slept — reset ALL state to avoid false positives
+            *self.state.lock().unwrap() = WatchdogState::Healthy;
+            *self.consecutive_timeouts.lock().unwrap() = 0;
+            *self.unresponsive_since.lock().unwrap() = None;
+            *self.last_heartbeat.lock().unwrap() = now;
+            *self.main_thread_probe_time.lock().unwrap() = now;
+            self.main_thread_unresponsive_reported.store(false, Ordering::SeqCst);
+            return None;
+        }
+
+        // Check main thread probe (takes priority over webview)
         if let Some(stalled_ms) = self.check_main_thread() {
             // Only report once per stall (one-shot)
             if !self.main_thread_unresponsive_reported.swap(true, Ordering::SeqCst) {
@@ -260,6 +321,8 @@ impl Watchdog {
         }
 
         // Then check webview heartbeat state machine
+        // Note: check() will NOT re-detect sleep (already handled above),
+        // so its sleep/wake branch is now a no-op safety net
         match self.check() {
             Some(WatchdogStateChange::BecameUnresponsive { missed_beats, threshold_s }) => {
                 Some(WatchdogTransition::Unresponsive { missed_beats, threshold_s })
@@ -305,6 +368,28 @@ impl Watchdog {
     #[cfg(test)]
     pub fn get_consecutive_timeouts(&self) -> u32 {
         *self.consecutive_timeouts.lock().unwrap()
+    }
+
+    /// Get main thread probe stalled_ms (for testing)
+    #[cfg(test)]
+    pub fn get_main_thread_stalled_ms(&self) -> Option<u64> {
+        self.check_main_thread()
+    }
+
+    /// Manually set main thread probe time to `age` in the past (for testing)
+    #[cfg(test)]
+    pub fn set_main_thread_probe_age(&self, age: Duration) {
+        let now = Instant::now();
+        let probe_time = now.checked_sub(age).unwrap_or(now);
+        *self.main_thread_probe_time.lock().unwrap() = probe_time;
+    }
+
+    /// Manually set last_check to `age` in the past (for testing sleep/wake)
+    #[cfg(test)]
+    pub fn set_last_check_age(&self, age: Duration) {
+        let now = Instant::now();
+        let check_time = now.checked_sub(age).unwrap_or(now);
+        *self.last_check.lock().unwrap() = check_time;
     }
 }
 
@@ -439,10 +524,7 @@ mod tests {
         wd.set_visibility(true);
 
         // Manually set last_check to far in the past to simulate sleep
-        {
-            let mut last_check = wd.last_check.lock().unwrap();
-            *last_check = Instant::now() - Duration::from_secs(60);
-        }
+        wd.set_last_check_age(Duration::from_secs(60));
 
         // Set unresponsive state
         wd.set_state(WatchdogState::Unresponsive);
@@ -450,5 +532,162 @@ mod tests {
         // Check should detect sleep/wake and reset
         assert!(wd.check().is_none());
         assert_eq!(wd.get_state(), WatchdogState::Healthy);
+    }
+
+    // === Regression tests for fix-watchdog-false-positives ===
+
+    /// FIX 1: Sleep/wake must not trigger false diag_native_main_unresponsive.
+    /// Simulates system sleep by:
+    /// - Setting last_check far in the past (simulates thread not running during sleep)
+    /// - Setting main_thread_probe_time far in the past (simulates probe not serviced)
+    /// With the old SystemTime implementation, after a >10s sleep the probe would appear
+    /// stale and trigger a false MainThreadUnresponsive. With Instant, elapsed() won't
+    /// advance during sleep, but we simulate the worst case (probe genuinely stale in
+    /// wall clock) and verify that check_and_transition detects the sleep gap FIRST.
+    #[test]
+    fn sleep_wake_no_false_main_thread_unresponsive() {
+        let wd = Watchdog::new();
+        wd.set_visibility(true);
+        wd.record_heartbeat();
+        wd.record_main_thread_probe();
+
+        // Simulate sleep: last_check is 60s in the past
+        wd.set_last_check_age(Duration::from_secs(60));
+        // Probe is also 60s in the past (would trigger >10s threshold)
+        wd.set_main_thread_probe_age(Duration::from_secs(60));
+
+        // check_and_transition should detect sleep FIRST and return None,
+        // NOT report MainThreadUnresponsive
+        let result = wd.check_and_transition();
+        assert!(
+            result.is_none(),
+            "Expected no transition after sleep/wake, got {:?}",
+            result
+        );
+    }
+
+    /// FIX 1b: After sleep/wake detection, the next normal cycle should also be clean.
+    #[test]
+    fn sleep_wake_then_normal_cycle_is_clean() {
+        let wd = Watchdog::new();
+        wd.set_visibility(true);
+
+        // Simulate sleep
+        wd.set_last_check_age(Duration::from_secs(60));
+        wd.set_main_thread_probe_age(Duration::from_secs(60));
+
+        // First cycle: sleep detected, resets everything
+        assert!(wd.check_and_transition().is_none());
+
+        // Record fresh probe and heartbeat
+        wd.record_main_thread_probe();
+        wd.record_heartbeat();
+
+        // Second cycle: everything fresh, no transitions
+        assert!(wd.check_and_transition().is_none());
+        assert_eq!(wd.get_state(), WatchdogState::Healthy);
+    }
+
+    /// FIX 2: hide→show must not trigger false diag_webview_unresponsive.
+    /// set_visibility(true) resets last_heartbeat, giving a grace period.
+    #[test]
+    fn show_resets_heartbeat_baseline() {
+        let wd = Watchdog::new();
+
+        // Panel visible, heartbeat healthy
+        wd.set_visibility(true);
+        wd.record_heartbeat();
+
+        // Hide panel
+        wd.set_visibility(false);
+
+        // Simulate 120s passing while hidden (well over 45s threshold)
+        // In real life, last_heartbeat would be 120s stale
+        wd.set_last_heartbeat(Duration::from_secs(120));
+
+        // Show panel — this must reset last_heartbeat to now
+        wd.set_visibility(true);
+
+        // Immediately check: should NOT be unresponsive
+        // (set_visibility(true) just reset last_heartbeat to now)
+        assert!(wd.check().is_none());
+        assert_eq!(wd.get_state(), WatchdogState::Healthy);
+        assert_eq!(wd.get_consecutive_timeouts(), 0);
+
+        // Even after one more check cycle, still healthy
+        // (because heartbeat was just reset to now, so time_since_beat ≈ 0)
+        assert!(wd.check().is_none());
+        assert_eq!(wd.get_state(), WatchdogState::Healthy);
+    }
+
+    /// FIX 2b: After show, even with stale heartbeat from before hide,
+    /// the grace period prevents false positives.
+    #[test]
+    fn hidden_long_then_show_no_false_positive() {
+        let wd = Watchdog::new();
+
+        // Start visible with healthy heartbeat
+        wd.set_visibility(true);
+        wd.record_heartbeat();
+
+        // Hide for a "long time" (simulate by aging the heartbeat)
+        wd.set_visibility(false);
+        wd.set_last_heartbeat(Duration::from_secs(300)); // 5 minutes stale
+
+        // Show again — grace period kicks in
+        wd.set_visibility(true);
+
+        // Two consecutive checks (normally would trigger unresponsive)
+        // But because set_visibility(true) reset the heartbeat, both should be clean
+        assert!(wd.check().is_none());
+        assert!(wd.check().is_none());
+        assert_eq!(wd.get_state(), WatchdogState::Healthy);
+        assert_eq!(wd.get_consecutive_timeouts(), 0);
+    }
+
+    /// Main thread probe uses monotonic Instant (not wall clock).
+    /// Verify that a fresh probe is not flagged as stale.
+    #[test]
+    fn main_thread_probe_fresh_not_stale() {
+        let wd = Watchdog::new();
+        wd.record_main_thread_probe();
+
+        // Fresh probe should not be stale
+        assert!(wd.get_main_thread_stalled_ms().is_none());
+    }
+
+    /// Main thread probe genuinely stale (not sleep-related) is detected.
+    #[test]
+    fn main_thread_probe_genuinely_stale_detected() {
+        let wd = Watchdog::new();
+
+        // Set probe to 30s in the past (exceeds 10s threshold)
+        wd.set_main_thread_probe_age(Duration::from_secs(30));
+
+        // Should be detected as stale
+        let stalled = wd.get_main_thread_stalled_ms();
+        assert!(stalled.is_some());
+        assert!(stalled.unwrap() >= 30_000);
+    }
+
+    /// check_and_transition reports MainThreadUnresponsive when probe is genuinely stale
+    /// and no sleep was detected.
+    #[test]
+    fn genuine_main_thread_stall_reported() {
+        let wd = Watchdog::new();
+        wd.set_visibility(true);
+        wd.record_heartbeat();
+
+        // Set probe to 30s in the past (genuine stall, not sleep)
+        wd.set_main_thread_probe_age(Duration::from_secs(30));
+
+        let result = wd.check_and_transition();
+        assert!(result.is_some(), "Expected MainThreadUnresponsive transition");
+        match result.unwrap() {
+            WatchdogTransition::MainThreadUnresponsive { stalled_ms } => {
+                assert!(stalled_ms >= 30_000, "stalled_ms should be >= 30000, got {}", stalled_ms);
+            }
+            other => panic!("Expected MainThreadUnresponsive, got {:?}", other),
+        }
     }
 }

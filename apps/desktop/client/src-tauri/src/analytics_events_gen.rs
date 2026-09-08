@@ -92,6 +92,7 @@ pub struct DiagLogsOpenFailedProps {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagNativeMainUnresponsiveProps {
     pub error_code: String,
+    pub stalled_ms: f64,
 }
 
 /// Properties for diag_rust_panic event

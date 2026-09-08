@@ -223,6 +223,7 @@ events:
     layer: rust
     status: active
     props:
+      stalled_ms: number
       error_code: string
     description: Native main thread blocked (run_on_main_thread timeout)
 
