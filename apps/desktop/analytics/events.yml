@@ -23,6 +23,32 @@ baseline_properties:
     type: boolean
     layer: webview
     description: "True when install_id IO failed at startup, causing identity bootstrap to be skipped"
+  
+  # Standard v1.1 §5 baseline properties (applied to all events)
+  app_version:
+    type: string
+    layer: both
+    description: "Application version from tauri.conf.json (VAL-ENV-003)"
+  environment:
+    type: string
+    layer: both
+    description: "Build environment: 'production' for release, 'development' for debug"
+  platform:
+    type: string
+    layer: both
+    description: "Operating system from std::env::consts::OS"
+  arch:
+    type: string
+    layer: both
+    description: "CPU architecture from std::env::consts::ARCH"
+  session_id:
+    type: string
+    layer: both
+    description: "Launch session ID (launch_id) for correlation"
+  source:
+    type: string
+    layer: both
+    description: "Event source: 'rust_native' or 'webview'"
 
 # Event definitions
 # layer: rust | webview | both

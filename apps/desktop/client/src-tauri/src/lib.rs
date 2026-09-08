@@ -667,6 +667,7 @@ pub fn run() {
             let panic_identity = IDENTITY.get().cloned();
             let panic_key = POSTHOG_KEY.to_string();
             let panic_host = POSTHOG_HOST.to_string();
+            let panic_version = APP_VERSION.get().cloned();
             std::panic::set_hook(Box::new(move |info| {
                 // Extract panic message
                 let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
@@ -683,6 +684,7 @@ pub fn run() {
 
                 // Send synchronously via panic_sender (bypasses batch queue)
                 if let Some((install_id, session_id)) = panic_identity.as_ref() {
+                    let app_version = panic_version.as_deref().unwrap_or("unknown");
                     panic_sender::send_panic_event(
                         &panic_key,
                         &panic_host,
@@ -690,6 +692,7 @@ pub fn run() {
                         session_id,
                         &message,
                         &backtrace,
+                        app_version,
                     );
                 } else {
                     eprintln!("[panic_hook] no identity available, cannot send panic event");
