@@ -42,4 +42,5 @@ jobs:
         env:
           POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
+          GH_TOKEN: ${{ github.token }}
         run: node apps/desktop/analytics/taxonomy-scan.mjs

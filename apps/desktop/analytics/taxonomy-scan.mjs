@@ -134,14 +134,24 @@ function createDriftIssue(eventName) {
     '_Created by taxonomy-scan workflow_',
   ].join('\n');
 
+  // Use --body-file to prevent shell injection via backticks in event names
+  const tmpFile = path.join('/tmp', `drift-issue-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
   try {
+    fs.writeFileSync(tmpFile, body);
     const result = execSync(
-      `gh issue create --title ${JSON.stringify(title)} --label taxonomy-drift,needs-triage --body ${JSON.stringify(body)}`,
+      `gh issue create --title ${JSON.stringify(title)} --label taxonomy-drift,needs-triage --body-file ${JSON.stringify(tmpFile)}`,
       { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
     ).trim();
     return result;
   } catch (err) {
     return `ERROR: ${err.message}`;
+  } finally {
+    // Cleanup temp file
+    try {
+      if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+    } catch {
+      // Ignore cleanup errors
+    }
   }
 }
 
@@ -213,7 +223,16 @@ async function main() {
   log('');
 
   // Compute drift: events online but not registered
-  const driftEvents = [...online7d].filter((e) => !allRegistered.has(e)).sort();
+  // Exclude PostHog system events ($ prefix like $create_alias, $pageview, etc.)
+  const systemEvents = [...online7d].filter((e) => e.startsWith('$')).sort();
+  const driftEvents = [...online7d]
+    .filter((e) => !allRegistered.has(e) && !e.startsWith('$'))
+    .sort();
+  
+  if (systemEvents.length > 0) {
+    log(`Excluded PostHog system events (${systemEvents.length}): ${systemEvents.join(', ')}`);
+  }
+  
   log(`### Drift Events (online 7d but NOT registered): ${driftEvents.length}`);
   if (driftEvents.length > 0) {
     for (const e of driftEvents) {
