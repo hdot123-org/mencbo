@@ -5,6 +5,10 @@
   "scripts": {
     "build": "pnpm -F mencbo run build",
     "typecheck": "pnpm -F mencbo run typecheck",
-    "test": "pnpm -F mencbo run test"
+    "test": "pnpm -F mencbo run test",
+    "analytics:codegen": "node apps/desktop/analytics/codegen.mjs"
+  },
+  "devDependencies": {
+    "yaml": "^2.8.1"
   }
 }
