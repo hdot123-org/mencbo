@@ -247,114 +247,115 @@ events:
       (bypasses batch queue, works under panic=abort). Process aborts after send (VAL-DIAG-006).
 
   # === Deprecated Events (old names) ===
+  # replaced_by is a YAML array (machine-readable) for taxonomy-drift-scan consumption
   quit:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: rust_exit
+    replaced_by: [rust_exit]
     description: Renamed to rust_exit
 
   tray_menu:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: rust_exit  # when item:quit
+    replaced_by: [rust_exit]
     description: Removed (redundant with rust_exit + app_update_check)
 
   tray_click:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: panel_open | panel_close
+    replaced_by: [panel_open, panel_close]
     description: Split into panel_open/panel_close with via:tray
 
   run_task:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: task_run
+    replaced_by: [task_run]
     description: Renamed to task_run ([module]_[action] format)
 
   run_task_spawn_failed:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: diag_task_spawn_failed
+    replaced_by: [diag_task_spawn_failed]
     description: Renamed to diag_task_spawn_failed (diag_ prefix)
 
   open_logs:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: logs_open
+    replaced_by: [logs_open]
     description: Renamed to logs_open ([module]_[action] format)
 
   open_logs_failed:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: diag_logs_open_failed
+    replaced_by: [diag_logs_open_failed]
     description: Renamed to diag_logs_open_failed (diag_ prefix)
 
   updater_check:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: app_update_check
+    replaced_by: [app_update_check]
     description: Renamed to app_update_check
 
   updater_error:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: app_update_failed
+    replaced_by: [app_update_failed]
     description: Renamed to app_update_failed
 
   updater_uptodate:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: app_update_checked
+    replaced_by: [app_update_checked]
     description: Renamed to app_update_checked with result:uptodate
 
   updater_installed:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: app_update_installed
+    replaced_by: [app_update_installed]
     description: Renamed to app_update_installed
 
   state_changed:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: state_sync
+    replaced_by: [state_sync]
     description: Renamed to state_sync
 
   js_state_loaded:
     layer: webview
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: state_load
+    replaced_by: [state_load]
     description: Renamed to state_load ([module]_[action] format)
 
   js_state_updated:
     layer: webview
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: state_sync
+    replaced_by: [state_sync]
     description: Renamed to state_sync (aligns with Rust side)
 
   state_load_failed:
     layer: webview
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: diag_state_load_failed
+    replaced_by: [diag_state_load_failed]
     description: Renamed to diag_state_load_failed (diag_ prefix)
 
   panel_blur_hide:
     layer: rust
     status: deprecated
     deprecated_since: "2026-09-07"
-    replaced_by: panel_close
+    replaced_by: [panel_close]
     description: Merged into panel_close with via:blur
