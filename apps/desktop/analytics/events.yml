@@ -12,7 +12,7 @@ posthog:
 # Code generators that consume this registry
 generators:
   typescript: apps/desktop/client/src/lib/analytics-events.gen.ts
-  rust: apps/desktop/client/src-tauri/src/analytics_events.gen.rs
+  rust: apps/desktop/client/src-tauri/src/analytics_events_gen.rs
 
 # Baseline properties (automatically attached to all events)
 # These are registered at analytics initialization and persist across all captures

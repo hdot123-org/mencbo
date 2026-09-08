@@ -28,6 +28,7 @@ jobs:
             desktop_changed:
               - 'apps/desktop/client/**'
               - 'apps/desktop/analytics/**'
+              - 'packages/mencbo/package.json'
               - 'pnpm-lock.yaml'
               - 'pnpm-workspace.yaml'
               - 'package.json'
