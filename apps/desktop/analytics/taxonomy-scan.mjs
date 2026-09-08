@@ -2,26 +2,80 @@
 /**
  * @fileoverview Taxonomy drift scanner
  * Compares PostHog online events against events.yml registry.
- * 
+ *
  * Modes:
  * - Live: POSTHOG_PERSONAL_API_KEY set + DRY_RUN != 'true'
  *   Queries PostHog, reports drift/dead/silent, creates GitHub issues for drift.
  * - Dry-run: secret missing or DRY_RUN=true
  *   Queries PostHog if key available but never creates issues.
  *   If key missing, outputs registry summary only.
- * 
+ *
  * Scanner discipline: no automatic PRs — issues only.
+ *
+ * Security invariants (INFRA-905):
+ * - gh CLI is invoked exclusively via execFileSync with argv arrays; the
+ *   scanner must never build shell command strings (no execSync), so event
+ *   names from PostHog can never be shell-interpreted.
+ * - Live-mode issue creation runs an auth pre-flight and fails loudly
+ *   (non-zero exit) instead of silently swallowing credential errors.
+ * - Idempotency lookups distinguish "checked, none found" from "check
+ *   failed"; a failed check aborts that event's issue creation rather than
+ *   risking duplicates.
  */
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
+import { fileURLToPath } from 'url';
 import yaml from 'yaml';
 
-const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../../..');
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 const EVENTS_YML = path.join(REPO_ROOT, 'apps/desktop/analytics/events.yml');
 const POSTHOG_HOST = 'https://us.posthog.com';
 const POSTHOG_PROJECT_ID = 597439;
+
+// Explicit repo target in CI (GITHUB_REPOSITORY is always set on Actions);
+// locally gh resolves the repo from the git remote.
+const GH_REPO = process.env.GITHUB_REPOSITORY || null;
+
+const DRIFT_LABELS = [
+  { name: 'taxonomy-drift', color: 'e3b341', description: 'Taxonomy drift detected by taxonomy-scan workflow' },
+  { name: 'needs-triage', color: 'd876e3', description: 'Awaiting triage' },
+];
+
+/**
+ * gh runner, overridable in tests. Always argv-array based — no shell.
+ */
+const defaultGhRunner = (args) =>
+  execFileSync('gh', args, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+
+let ghRunner = defaultGhRunner;
+
+export function _setGhRunnerForTests(fn) {
+  ghRunner = fn || defaultGhRunner;
+}
+
+function ghRepoArgs() {
+  return GH_REPO ? ['--repo', GH_REPO] : [];
+}
+
+function ghExec(args) {
+  try {
+    return ghRunner([...ghRepoArgs(), ...args]).trim();
+  } catch (err) {
+    throw new Error(`gh ${args[0]} failed: ${describeGhError(err)}`);
+  }
+}
+
+/**
+ * Extract a readable message from a gh failure (stderr carries the actual
+ * reason, e.g. auth/permission errors).
+ */
+function describeGhError(err) {
+  const stderr = err && err.stderr ? Buffer.from(err.stderr).toString('utf-8').trim() : '';
+  return stderr || (err && err.message) || String(err);
+}
 
 /**
  * Query PostHog HogQL API
@@ -48,6 +102,9 @@ async function queryPostHog(apiKey, hogql) {
  * Get distinct event names seen within last N days
  */
 async function getOnlineEventNames(apiKey, days) {
+  if (!Number.isInteger(days) || days <= 0) {
+    throw new Error(`Invalid interval (expected positive integer): ${days}`);
+  }
   const result = await queryPostHog(
     apiKey,
     `SELECT event FROM events WHERE timestamp > now() - INTERVAL ${days} DAY GROUP BY event`,
@@ -59,6 +116,28 @@ async function getOnlineEventNames(apiKey, days) {
     }
   }
   return names;
+}
+
+/**
+ * PostHog built-in / system events (e.g. $pageview, $identify,
+ * $autocapture, $create_alias, $groupidentify, $merge_duplicated_people).
+ * They are not user-defined and never belong in events.yml, so they are
+ * excluded from drift to prevent noisy false positives.
+ */
+export function isPostHogSystemEvent(name) {
+  return typeof name === 'string' && name.startsWith('$');
+}
+
+/**
+ * Compute drift from online events vs registered names.
+ * Returns: { systemEvents: string[], driftEvents: string[] } (sorted)
+ */
+export function computeDrift(onlineEvents, registeredNames) {
+  const systemEvents = [...onlineEvents].filter(isPostHogSystemEvent).sort();
+  const driftEvents = [...onlineEvents]
+    .filter((e) => !registeredNames.has(e) && !isPostHogSystemEvent(e))
+    .sort();
+  return { systemEvents, driftEvents };
 }
 
 /**
@@ -101,29 +180,62 @@ function parseRegistry() {
 }
 
 /**
- * Check if a GitHub issue already exists for a drift event (idempotent)
+ * Canonical drift issue title (single definition keeps idempotency exact)
  */
-function findExistingIssue(eventName) {
-  try {
-    const raw = execSync(
-      `gh issue list --state all --label taxonomy-drift --search "${eventName}" --json number,title --limit 5`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-    ).trim();
-    const issues = JSON.parse(raw || '[]');
-    // Exact match on title pattern
-    return issues.find(
-      (i) => i.title && i.title.includes(eventName),
-    );
-  } catch {
-    return null;
+export function driftIssueTitle(eventName) {
+  return `Taxonomy drift: unregistered event '${eventName}'`;
+}
+
+/**
+ * Check if a GitHub issue already exists for a drift event (idempotent).
+ * Throws on gh failure (auth, network, permissions) so the caller can
+ * distinguish "checked, none found" from "check failed".
+ */
+export function findExistingIssue(eventName) {
+  const raw = ghExec([
+    'issue', 'list',
+    '--state', 'all',
+    '--label', 'taxonomy-drift',
+    '--search', `"${eventName}" in:title`,
+    '--json', 'number,title',
+    '--limit', '20',
+  ]);
+  const issues = JSON.parse(raw || '[]');
+  const target = driftIssueTitle(eventName);
+  return issues.find((i) => i.title === target) || null;
+}
+
+/**
+ * Pre-flight for live mode: exercises gh auth + repo resolution + issues
+ * read in one round trip. Throws with a readable message on failure.
+ */
+function ghPreflight() {
+  ghExec(['issue', 'list', '--label', 'taxonomy-drift', '--state', 'all', '--json', 'number', '--limit', '1']);
+}
+
+/**
+ * Ensure drift labels exist (gh issue create fails on unknown labels).
+ * Idempotent: --force updates in place when the label already exists.
+ */
+function ensureDriftLabels() {
+  for (const label of DRIFT_LABELS) {
+    ghExec([
+      'label', 'create', label.name,
+      '--color', label.color,
+      '--description', label.description,
+      '--force',
+    ]);
   }
 }
 
 /**
- * Create a GitHub issue for a drift event
+ * Create a GitHub issue for a drift event.
+ * Title and labels are passed as discrete argv elements (no shell), and the
+ * body travels via a temp file, so hostile event names cannot inject.
+ * Throws on gh failure.
  */
-function createDriftIssue(eventName) {
-  const title = `Taxonomy drift: unregistered event '${eventName}'`;
+export function createDriftIssue(eventName) {
+  const title = driftIssueTitle(eventName);
   const body = [
     `Event \`${eventName}\` was observed in PostHog (last 7 days) but is not registered in \`events.yml\`.`,
     '',
@@ -134,24 +246,19 @@ function createDriftIssue(eventName) {
     '_Created by taxonomy-scan workflow_',
   ].join('\n');
 
-  // Use --body-file to prevent shell injection via backticks in event names
-  const tmpFile = path.join('/tmp', `drift-issue-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'taxonomy-drift-'));
+  const tmpFile = path.join(dir, 'issue-body.md');
   try {
     fs.writeFileSync(tmpFile, body);
-    const result = execSync(
-      `gh issue create --title ${JSON.stringify(title)} --label taxonomy-drift,needs-triage --body-file ${JSON.stringify(tmpFile)}`,
-      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] },
-    ).trim();
-    return result;
-  } catch (err) {
-    return `ERROR: ${err.message}`;
+    return ghExec([
+      'issue', 'create',
+      '--title', title,
+      '--label', 'taxonomy-drift',
+      '--label', 'needs-triage',
+      '--body-file', tmpFile,
+    ]);
   } finally {
-    // Cleanup temp file
-    try {
-      if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
-    } catch {
-      // Ignore cleanup errors
-    }
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 }
 
@@ -223,16 +330,12 @@ async function main() {
   log('');
 
   // Compute drift: events online but not registered
-  // Exclude PostHog system events ($ prefix like $create_alias, $pageview, etc.)
-  const systemEvents = [...online7d].filter((e) => e.startsWith('$')).sort();
-  const driftEvents = [...online7d]
-    .filter((e) => !allRegistered.has(e) && !e.startsWith('$'))
-    .sort();
-  
+  const { systemEvents, driftEvents } = computeDrift(online7d, allRegistered);
+
   if (systemEvents.length > 0) {
     log(`Excluded PostHog system events (${systemEvents.length}): ${systemEvents.join(', ')}`);
   }
-  
+
   log(`### Drift Events (online 7d but NOT registered): ${driftEvents.length}`);
   if (driftEvents.length > 0) {
     for (const e of driftEvents) {
@@ -270,18 +373,46 @@ async function main() {
   // Issue creation for drift events (live mode only)
   if (!dryRun && driftEvents.length > 0) {
     log('Creating GitHub issues for drift events...');
+
+    // Pre-flight: verify auth + repo + issue read before any mutation.
+    // A credential failure here must fail the run loudly (INFRA-905).
+    try {
+      ghPreflight();
+      ensureDriftLabels();
+    } catch (err) {
+      log(`ERROR: GitHub pre-flight failed (auth/repo/labels): ${describeGhError(err)}`);
+      log('Aborting issue creation. Verify GH_TOKEN and issues: write permission, then re-run.');
+      process.exitCode = 1;
+      return;
+    }
+
+    let failures = 0;
     for (const eventName of driftEvents) {
-      const existing = findExistingIssue(eventName);
+      let existing;
+      try {
+        existing = findExistingIssue(eventName);
+      } catch (err) {
+        failures += 1;
+        log(`  [FAIL] idempotency check for "${eventName}": ${describeGhError(err)}`);
+        continue;
+      }
       if (existing) {
         log(`  [SKIP] Issue #${existing.number} already exists for "${eventName}"`);
         continue;
       }
-      const result = createDriftIssue(eventName);
-      if (result.startsWith('ERROR:')) {
-        log(`  [FAIL] "${eventName}": ${result}`);
-      } else {
-        log(`  [CREATED] ${result}`);
+      try {
+        const url = createDriftIssue(eventName);
+        log(`  [CREATED] ${url}`);
+      } catch (err) {
+        failures += 1;
+        log(`  [FAIL] create issue for "${eventName}": ${describeGhError(err)}`);
       }
+    }
+
+    if (failures > 0) {
+      log('');
+      log(`ERROR: ${failures}/${driftEvents.length} drift issue operation(s) failed in live mode`);
+      process.exitCode = 1;
     }
   } else if (dryRun && driftEvents.length > 0) {
     log('Dry-run mode: skipping issue creation');
@@ -338,7 +469,12 @@ function writeStepSummary(lines, isGitHubActions) {
   fs.appendFileSync(summaryPath, summary + '\n');
 }
 
-main().catch((err) => {
-  console.error('Scanner failed:', err.message);
-  process.exit(1);
-});
+// Run only when executed directly (imports for tests must not trigger a scan)
+const isDirectRun =
+  process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error('Scanner failed:', err.message);
+    process.exit(1);
+  });
+}
