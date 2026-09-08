@@ -677,8 +677,9 @@ pub fn run() {
                     "unknown panic".to_string()
                 };
 
-                // Capture backtrace (requires RUST_BACKTRACE=1)
-                let backtrace = std::backtrace::Backtrace::capture().to_string();
+                // Capture backtrace unconditionally (force_capture ignores RUST_BACKTRACE env var)
+                // For panic diagnostics, we always want maximum diagnostic info regardless of env config
+                let backtrace = std::backtrace::Backtrace::force_capture().to_string();
 
                 // Send synchronously via panic_sender (bypasses batch queue)
                 if let Some((install_id, session_id)) = panic_identity.as_ref() {
