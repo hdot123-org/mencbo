@@ -41,6 +41,10 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      - name: Analytics scanner tests
+        working-directory: .
+        run: node --test apps/desktop/analytics/*.test.mjs
+
   daemon:
     name: Test (Daemon)
     runs-on: ubuntu-latest
