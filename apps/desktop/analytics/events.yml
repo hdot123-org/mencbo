@@ -65,17 +65,23 @@ events:
     status: active
     props:
       uptime_sec: number
-      seq: number  # Monotonic counter within session, starts at 0
-    description: 5-minute heartbeat from webview layer (seq increments each emission)
+      seq: number  # Monotonic counter within visible window, resets on context rebuild
+    description: >
+      Visibility-period heartbeat from webview layer. seq is monotonic only within
+      each visible window (panel shown); across hidden windows seq resets to 0
+      (JS context rebuilt by macOS App Nap suspension of WKWebView). Missing heartbeats
+      during hidden periods are normal — not event loss. Gap detection applies only
+      within visible windows (seq gap ≥10 min without filling = suspected loss).
+      Contrast with rust_heartbeat which is process-level and runs regardless of visibility.
 
   # === Panel Events ===
   panel_open:
     layer: rust
     status: active
     props:
-      via: string  # tray
+      via: string  # tray | reopen
       panel_id: string  # Unique panel instance ID (session_id)
-    description: Panel shown (Rust single source since #52)
+    description: Panel shown (Rust single source since #52; via:reopen for single-instance second launch)
 
   panel_close:
     layer: rust

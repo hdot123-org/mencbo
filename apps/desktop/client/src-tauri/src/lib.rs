@@ -527,6 +527,12 @@ pub fn run() {
             if let Some(panel) = app.get_webview_window("panel") {
                 let _ = panel.show();
                 let _ = panel.set_focus();
+                // Emit panel_open{via:'reopen'} so analytics tracks reopen events
+                // (fix-reopen-panel-open: single-instance callback补发 panel_open)
+                posthog_capture("panel_open", serde_json::json!({
+                    "via": "reopen",
+                    "panel_id": get_panel_id(),
+                }));
             }
         }))
         .invoke_handler(tauri::generate_handler![

@@ -97,9 +97,13 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 | `rust_exit` | rust | Process exit | `reason: normal\|dirty\|abnormal`, `via: command\|tray_menu\|unknown`, `uptime_s` |
 | `rust_heartbeat` | rust | Every 5 min | `seq` (monotonic within session, resets on restart) |
 | `js_launch` | webview | Webview init | — |
-| `js_heartbeat` | webview | Every 5 min | `uptime_sec`, `seq` (monotonic within session, resets on restart) |
+| `js_heartbeat` | webview | Every 5 min (visible period only) | `uptime_sec`, `seq` (monotonic within visible window, resets on context rebuild) |
 
-**Heartbeat sequence gap detection**: Both heartbeats carry a monotonic `seq` counter (starts at 0, increments each emission within the session). A gap where `seq[n+1] - seq[n] > 1` combined with a timestamp gap ≥10 minutes indicates genuine event loss, distinguishing it from normal batching delays (<2 min). See §6.1 for HogQL detection query.
+**Heartbeat sequence gap detection**:
+- **`rust_heartbeat`** (process-level): seq is monotonic across the entire process lifecycle. A gap where `seq[n+1] - seq[n] > 1` combined with a timestamp gap ≥10 minutes indicates genuine event loss.
+- **`js_heartbeat`** (visibility-period, 2026-09-08 user ruling): seq is monotonic **only within each visible window** (panel shown). When the panel is hidden, macOS suspends WKWebView (App Nap), freezing JS timers — this is normal behavior, not event loss. Across hidden windows, seq resets to 0 (JS context rebuilt). Gap detection applies only within visible windows: seq gap ≥10 minutes without filling = suspected event loss. Hidden-period gaps are exempt.
+
+See §6.1 for HogQL detection query.
 
 **Exit event semantics (architecture decision 4)**:
 - **Normal exit** (`reason: normal`): Triggered by user-initiated quit (tray menu, window close). Rust clears the session marker, emits `rust_exit` with `uptime_s` (seconds since launch), and performs synchronous flush (≤3s timeout).
@@ -111,13 +115,14 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 
 | Event | Layer | Trigger | Properties |
 |-------|-------|---------|------------|
-| `panel_open` | both | Panel shown | `via: tray`, `panel_id: session_id` |
-| `panel_close` | both | Panel hidden | `via: tray\|blur\|close`, `panel_id: session_id` |
+| `panel_open` | rust | Panel shown | `via: tray\|reopen`, `panel_id: session_id` |
+| `panel_close` | rust | Panel hidden | `via: tray\|blur\|close`, `panel_id: session_id` |
 
 **Panel event paths**:
 - `tray`: User clicks tray icon to toggle panel visibility
 - `blur`: Panel loses focus (WindowEvent::Focused(false))
 - `close`: Window close request (WindowEvent::CloseRequested, prevented and hidden instead)
+- `reopen`: Single-instance guard callback — second launch attempt shows existing panel (fix-reopen-panel-open)
 
 All panel events include `panel_id` (derived from session_id) for correlation across open/close pairs.
 
@@ -223,6 +228,8 @@ GROUP BY session_id
 HAVING length(ids) > 1
 
 -- Heartbeat gap detection (±300s tolerance for sleep/batch delay)
+-- Note: js_heartbeat seq resets across hidden windows (macOS App Nap);
+-- gap detection applies only within visible windows, not across hide/show cycles.
 SELECT session_id,
        maxIf(timestamp, event = 'rust_heartbeat') AS last_rust,
        maxIf(timestamp, event = 'js_heartbeat') AS last_js
