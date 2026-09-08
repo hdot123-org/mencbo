@@ -2,6 +2,7 @@ mod analytics;
 mod identity;
 mod session_marker;
 mod analytics_events_gen;
+mod watchdog;
 
 use serde_json::Value;
 use tauri::{
@@ -387,6 +388,15 @@ fn analytics_identity() -> Result<Value, String> {
     Ok(identity_payload(install_id, session_id))
 }
 
+/// Heartbeat ping from webview (async fn per architecture decision #5).
+/// Called every 15 seconds from JS to prove webview responsiveness.
+/// Updates the watchdog's last_heartbeat timestamp.
+#[tauri::command]
+async fn heartbeat_ping() -> Result<(), String> {
+    watchdog::Watchdog::global().record_heartbeat();
+    Ok(())
+}
+
 #[tauri::command]
 async fn run_task(task: String) -> Result<(), String> {
     posthog_capture(Event::TaskRun, serde_json::json!({ "task": task }));
@@ -552,7 +562,8 @@ pub fn run() {
             open_logs_dir,
             quit_app,
             check_update,
-            analytics_identity
+            analytics_identity,
+            heartbeat_ping
         ])
         .setup(|app| {
             // Hide Dock icon (macOS only)
@@ -647,6 +658,38 @@ pub fn run() {
                 std::thread::sleep(std::time::Duration::from_secs(5 * 60));
                 let seq = RUST_HEARTBEAT_SEQ.next();
                 posthog_capture(Event::RustHeartbeat, serde_json::json!({"seq": seq}));
+            });
+
+            // Watchdog: detect webview/main thread hangs (M4 diagnostics)
+            // JS side sends heartbeat_ping every 15s via invoke
+            // Rust checks every 5s with 45s threshold, requires 2 consecutive timeouts
+            // State machine: Healthy → Unresponsive → Recovered
+            // Emits events only on state transitions
+            std::thread::spawn(|| {
+                let wd = watchdog::Watchdog::global();
+                wd.start_monitoring_loop(|transition| {
+                    match transition {
+                        watchdog::WatchdogTransition::Unresponsive { missed_beats, threshold_s } => {
+                            posthog_capture(
+                                Event::DiagWebviewUnresponsive,
+                                serde_json::json!({
+                                    "missed_js_beats": missed_beats,
+                                    "threshold_s": threshold_s,
+                                    "error_code": "E_WEBVIEW_UNRESPONSIVE",
+                                }),
+                            );
+                        }
+                        watchdog::WatchdogTransition::Recovered { freeze_duration_ms } => {
+                            posthog_capture(
+                                Event::DiagWebviewRecovered,
+                                serde_json::json!({
+                                    "freeze_duration_ms": freeze_duration_ms,
+                                    "error_code": "E_WEBVIEW_RECOVERED",
+                                }),
+                            );
+                        }
+                    }
+                });
             });
 
             // Auto-update: check at startup, then every 6h. Silent download +

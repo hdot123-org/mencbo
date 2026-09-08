@@ -28,12 +28,24 @@ export interface AppEventMap {
     error: string;
     stage: string;
   };
+  diag_native_main_unresponsive: {
+    error_code: string;
+  };
   diag_state_load_failed: {
     reason: string;
   };
   diag_task_spawn_failed: {
     error: string;
     task: string;
+  };
+  diag_webview_recovered: {
+    error_code: string;
+    freeze_duration_ms: number;
+  };
+  diag_webview_unresponsive: {
+    error_code: string;
+    missed_js_beats: number;
+    threshold_s: number;
   };
   js_error: {
     message: string;
