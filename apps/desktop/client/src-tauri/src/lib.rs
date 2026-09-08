@@ -1,6 +1,7 @@
 mod analytics;
 mod identity;
 mod session_marker;
+mod analytics_events_gen;
 
 use serde_json::Value;
 use tauri::{
@@ -10,6 +11,7 @@ use tauri::{
 };
 use tauri_plugin_updater::UpdaterExt;
 use identity::{get_or_create_install_id, generate_launch_id};
+use analytics_events_gen::Event;
 
 /// PostHog observability. Key is injected at build time via build.rs from POSTHOG_KEY env var.
 /// If POSTHOG_KEY is not set, falls back to "NO_KEY" sentinel and all captures become no-op.
@@ -156,7 +158,7 @@ static RUST_HEARTBEAT_SEQ: heartbeat_seq::HeartbeatSeq = heartbeat_seq::Heartbea
 /// - environment: "production" for release builds (VAL-ENV-002)
 /// - platform/arch: from std::env::consts
 /// - session_id/source: identity information
-fn posthog_capture(event: &str, mut props: serde_json::Value) {
+fn posthog_capture(event: Event, mut props: serde_json::Value) {
     // No-op in debug builds (VAL-ENV-001: dev 构建零上报)
     if cfg!(debug_assertions) {
         return;
@@ -387,7 +389,7 @@ fn analytics_identity() -> Result<Value, String> {
 
 #[tauri::command]
 async fn run_task(task: String) -> Result<(), String> {
-    posthog_capture("task_run", serde_json::json!({ "task": task }));
+    posthog_capture(Event::TaskRun, serde_json::json!({ "task": task }));
     let uv_bin =
         std::env::var("MENCBO_UV_BIN").unwrap_or_else(|_| "/opt/homebrew/bin/uv".to_string());
 
@@ -410,7 +412,7 @@ async fn run_task(task: String) -> Result<(), String> {
                     program, task, e
                 );
                 posthog_capture(
-                    "diag_task_spawn_failed",
+                    Event::DiagTaskSpawnFailed,
                     serde_json::json!({ "task": task, "error": e.to_string() }),
                 );
             }
@@ -430,7 +432,7 @@ fn open_logs_dir() -> Result<(), String> {
     if let Err(e) = std::fs::create_dir_all(&log_dir) {
         let m = format!("Failed to create log directory: {}", e);
         posthog_capture(
-            "diag_logs_open_failed",
+            Event::DiagLogsOpenFailed,
             serde_json::json!({ "stage": "mkdir", "error": m }),
         );
         return Err(m);
@@ -440,13 +442,13 @@ fn open_logs_dir() -> Result<(), String> {
     if let Err(e) = std::process::Command::new("open").arg(&log_dir).spawn() {
         let m = format!("Failed to open log directory: {}", e);
         posthog_capture(
-            "diag_logs_open_failed",
+            Event::DiagLogsOpenFailed,
             serde_json::json!({ "stage": "finder", "error": m }),
         );
         return Err(m);
     }
 
-    posthog_capture("logs_open", serde_json::json!({}));
+    posthog_capture(Event::LogsOpen, serde_json::json!({}));
     Ok(())
 }
 
@@ -471,13 +473,13 @@ async fn check_and_install(
     handle: &tauri::AppHandle,
     source: &str,
 ) -> Result<UpdateOutcome, String> {
-    posthog_capture("app_update_check", serde_json::json!({ "source": source }));
+    posthog_capture(Event::AppUpdateCheck, serde_json::json!({ "source": source }));
     let updater = match handle.updater_builder().build() {
         Ok(u) => u,
         Err(e) => {
             let m = format!("builder error: {e}");
             posthog_capture(
-                "app_update_failed",
+                Event::AppUpdateFailed,
                 serde_json::json!({ "stage": "builder", "detail": m, "source": source }),
             );
             return Err(m);
@@ -486,13 +488,13 @@ async fn check_and_install(
     let update = match updater.check().await {
         Ok(Some(u)) => u,
         Ok(None) => {
-            posthog_capture("app_update_checked", serde_json::json!({ "result": "uptodate", "source": source }));
+            posthog_capture(Event::AppUpdateChecked, serde_json::json!({ "result": "uptodate", "source": source }));
             return Ok(UpdateOutcome::UpToDate);
         }
         Err(e) => {
             let m = format!("check failed: {e}");
             posthog_capture(
-                "app_update_failed",
+                Event::AppUpdateFailed,
                 serde_json::json!({ "stage": "check", "detail": m, "source": source }),
             );
             return Err(m);
@@ -503,13 +505,13 @@ async fn check_and_install(
     if let Err(e) = update.download_and_install(|_, _| {}, || {}).await {
         let m = format!("install failed: {e}");
         posthog_capture(
-            "app_update_failed",
+            Event::AppUpdateFailed,
             serde_json::json!({ "stage": "install", "detail": m, "source": source }),
         );
         return Err(m);
     }
     posthog_capture(
-        "app_update_installed",
+        Event::AppUpdateInstalled,
         serde_json::json!({ "to": target, "source": source }),
     );
     Ok(UpdateOutcome::Installed)
@@ -538,7 +540,7 @@ pub fn run() {
                 let _ = panel.set_focus();
                 // Emit panel_open{via:'reopen'} so analytics tracks reopen events
                 // (fix-reopen-panel-open: single-instance callback补发 panel_open)
-                posthog_capture("panel_open", serde_json::json!({
+                posthog_capture(Event::PanelOpen, serde_json::json!({
                     "via": "reopen",
                     "panel_id": get_panel_id(),
                 }));
@@ -622,7 +624,7 @@ pub fn run() {
                     .unwrap_or(0);
                 
                 posthog_capture(
-                    "rust_exit",
+                    Event::RustExit,
                     serde_json::json!({
                         "reason": "dirty",
                         "prev_session_id": prev_session_id,
@@ -636,7 +638,7 @@ pub fn run() {
             // js_heartbeat gaps, a hang is localized to the webview layer.
             // Note: rust_launch carries both version (old, transitional) and app_version (new)
             posthog_capture(
-                "rust_launch",
+                Event::RustLaunch,
                 serde_json::json!({ 
                     "version": app_version,  // Old property (transitional, one version cycle)
                 }),
@@ -644,7 +646,7 @@ pub fn run() {
             std::thread::spawn(|| loop {
                 std::thread::sleep(std::time::Duration::from_secs(5 * 60));
                 let seq = RUST_HEARTBEAT_SEQ.next();
-                posthog_capture("rust_heartbeat", serde_json::json!({"seq": seq}));
+                posthog_capture(Event::RustHeartbeat, serde_json::json!({"seq": seq}));
             });
 
             // Auto-update: check at startup, then every 6h. Silent download +
@@ -733,7 +735,7 @@ pub fn run() {
                             // Native-side interaction proof, independent of the
                             // webview: during a hang, tray_click keeps flowing
                             // while $autocapture/panel_open stop → webview hang.
-                            posthog_capture("panel_close", serde_json::json!({ 
+                            posthog_capture(Event::PanelClose, serde_json::json!({ 
                                 "via": "tray",
                                 "panel_id": panel_id,
                             }));
@@ -768,7 +770,7 @@ pub fn run() {
                         let _ = panel.set_position(Position::Physical(PhysicalPosition::new(x, y)));
                         let _ = panel.show();
                         let _ = panel.set_focus();
-                        posthog_capture("panel_open", serde_json::json!({ 
+                        posthog_capture(Event::PanelOpen, serde_json::json!({ 
                             "via": "tray",
                             "panel_id": panel_id,
                         }));
@@ -787,7 +789,7 @@ pub fn run() {
                     // Prevents double-send when tray already closed the panel
                     if panel_for_blur.is_visible().unwrap_or(false) {
                         let _ = panel_for_blur.hide();
-                        posthog_capture("panel_close", serde_json::json!({ 
+                        posthog_capture(Event::PanelClose, serde_json::json!({ 
                             "via": "blur",
                             "panel_id": get_panel_id(),
                         }));
@@ -796,7 +798,7 @@ pub fn run() {
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     let _ = panel_for_blur.hide();
-                    posthog_capture("panel_close", serde_json::json!({ 
+                    posthog_capture(Event::PanelClose, serde_json::json!({ 
                         "via": "close",
                         "panel_id": get_panel_id(),
                     }));
@@ -909,7 +911,7 @@ pub fn run() {
                                 // Use the shared transform helper — same shape as get_state
                                 let payload = read_and_transform_state(&path_clone);
                                 posthog_capture(
-                                    "state_sync",
+                                    Event::StateSync,
                                     serde_json::json!({
                                         "tasks": payload["tasks"].as_array().map(|a| a.len()),
                                         "mock": payload["mock"].as_bool().unwrap_or(false),
@@ -976,7 +978,7 @@ pub fn run() {
                     let pending_flushed = analytics::flush_sync(std::time::Duration::from_secs(3));
                     
                     // Now enqueue rust_exit with the flush status
-                    posthog_capture("rust_exit", serde_json::json!({
+                    posthog_capture(Event::RustExit, serde_json::json!({
                         "reason": reason,
                         "via": via,
                         "uptime_s": uptime_s,

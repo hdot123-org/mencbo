@@ -1,0 +1,3 @@
+# Mark generated files as linguist-generated (hidden in diffs by default)
+apps/desktop/client/src/lib/analytics-events.gen.ts linguist-generated=true
+apps/desktop/client/src-tauri/src/analytics_events_gen.rs linguist-generated=true

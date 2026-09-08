@@ -24,6 +24,7 @@ function App() {
       setState(s);
       capture("state_sync", {
         tasks: Array.isArray(s.tasks) ? s.tasks.length : 0,
+        mock: false,
       });
     });
     return unsubscribe;
