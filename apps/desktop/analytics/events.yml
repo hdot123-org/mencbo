@@ -12,7 +12,7 @@ posthog:
 # Code generators that consume this registry
 generators:
   typescript: apps/desktop/client/src/lib/analytics-events.gen.ts
-  rust: apps/desktop/client/src-tauri/src/analytics_events.rs
+  rust: apps/desktop/client/src-tauri/src/analytics_events.gen.rs
 
 # Baseline properties (automatically attached to all events)
 # These are registered at analytics initialization and persist across all captures
@@ -41,11 +41,11 @@ events:
     status: active
     props:
       reason: string  # normal | dirty | abnormal
-      via: string     # command | tray_menu | system | unknown
+      via: string     # command | tray_menu | system (dirty path does not emit via)
       uptime_s: number
       prev_session_id: string  # dirty path only: previous session's session_id
       pending_flushed: boolean  # normal path only: result of flush_sync before exit
-    description: Process exit event (architecture decision 4: rust 权威退出事件)
+    description: "Process exit event (architecture decision 4: rust authoritative exit event)"
 
   rust_heartbeat:
     layer: rust

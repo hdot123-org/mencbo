@@ -1,6 +1,7 @@
 import posthog from "posthog-js";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import type { AppEventMap } from "./analytics-events.gen";
 
 // PostHog US project "MenCbo Desktop" — capture-only key, injected at build time via VITE_POSTHOG_KEY env var.
 // If not set (local dev without explicit injection), falls back to "NO_KEY" sentinel and all captures become no-op.
@@ -193,7 +194,7 @@ export async function initAnalytics() {
     }
 
     // js_launch — now that posthog is initialized
-    capture("js_launch");
+    capture("js_launch", {});
   }
 
   // Step 5: ALWAYS register error listeners and heartbeat, regardless of
@@ -202,7 +203,6 @@ export async function initAnalytics() {
   window.addEventListener("error", (e) =>
     capture("js_error", {
       message: String(e.message).slice(0, 300),
-      line: e.lineno,
     }),
   );
   window.addEventListener("unhandledrejection", (e) =>
@@ -222,7 +222,10 @@ export async function initAnalytics() {
   }, 5 * 60 * 1000);
 }
 
-export function capture(event: string, props?: Record<string, unknown>) {
+export function capture<K extends keyof AppEventMap>(
+  event: K,
+  props: AppEventMap[K] = {} as AppEventMap[K]
+) {
   try {
     // Check for duplicate events (fixes state_load double-fire)
     if (shouldSkipDuplicate(event)) {
