@@ -1,0 +1,41 @@
+name: Taxonomy Scan
+
+on:
+  schedule:
+    - cron: '47 13 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run mode (no issue creation)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  scan:
+    name: Taxonomy Drift Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run taxonomy scan
+        env:
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: node apps/desktop/analytics/taxonomy-scan.mjs
