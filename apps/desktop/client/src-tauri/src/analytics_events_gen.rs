@@ -17,8 +17,11 @@ pub enum Event {
     AppUpdateInstalled,
     DiagIdentityFailed,
     DiagLogsOpenFailed,
+    DiagNativeMainUnresponsive,
     DiagStateLoadFailed,
     DiagTaskSpawnFailed,
+    DiagWebviewRecovered,
+    DiagWebviewUnresponsive,
     JsError,
     JsHeartbeat,
     JsLaunch,
@@ -75,6 +78,12 @@ pub struct DiagLogsOpenFailedProps {
     pub stage: String,
 }
 
+/// Properties for diag_native_main_unresponsive event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagNativeMainUnresponsiveProps {
+    pub error_code: String,
+}
+
 /// Properties for diag_state_load_failed event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagStateLoadFailedProps {
@@ -86,6 +95,21 @@ pub struct DiagStateLoadFailedProps {
 pub struct DiagTaskSpawnFailedProps {
     pub error: String,
     pub task: String,
+}
+
+/// Properties for diag_webview_recovered event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagWebviewRecoveredProps {
+    pub error_code: String,
+    pub freeze_duration_ms: f64,
+}
+
+/// Properties for diag_webview_unresponsive event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagWebviewUnresponsiveProps {
+    pub error_code: String,
+    pub missed_js_beats: f64,
+    pub threshold_s: f64,
 }
 
 /// Properties for js_error event
@@ -173,8 +197,11 @@ impl Event {
             Event::AppUpdateInstalled => "app_update_installed",
             Event::DiagIdentityFailed => "diag_identity_failed",
             Event::DiagLogsOpenFailed => "diag_logs_open_failed",
+            Event::DiagNativeMainUnresponsive => "diag_native_main_unresponsive",
             Event::DiagStateLoadFailed => "diag_state_load_failed",
             Event::DiagTaskSpawnFailed => "diag_task_spawn_failed",
+            Event::DiagWebviewRecovered => "diag_webview_recovered",
+            Event::DiagWebviewUnresponsive => "diag_webview_unresponsive",
             Event::JsError => "js_error",
             Event::JsHeartbeat => "js_heartbeat",
             Event::JsLaunch => "js_launch",

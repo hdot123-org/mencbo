@@ -201,6 +201,31 @@ events:
       reason: string
     description: Identity bootstrap failed (invoke or init failure)
 
+  # === Diagnostic Events (M4 Watchdog) ===
+  diag_webview_unresponsive:
+    layer: rust
+    status: active
+    props:
+      missed_js_beats: number
+      threshold_s: number
+      error_code: string
+    description: Webview frozen - JS heartbeat stopped responding (visibility-aware, only during visible period)
+
+  diag_webview_recovered:
+    layer: rust
+    status: active
+    props:
+      freeze_duration_ms: number
+      error_code: string
+    description: Webview recovered from frozen state
+
+  diag_native_main_unresponsive:
+    layer: rust
+    status: active
+    props:
+      error_code: string
+    description: Native main thread blocked (run_on_main_thread timeout)
+
   # === Deprecated Events (old names) ===
   quit:
     layer: rust

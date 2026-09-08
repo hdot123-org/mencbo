@@ -2,6 +2,7 @@ mod analytics;
 mod identity;
 mod session_marker;
 mod analytics_events_gen;
+mod watchdog;
 
 use serde_json::Value;
 use tauri::{
@@ -30,6 +31,10 @@ static APP_VERSION: OnceLock<String> = OnceLock::new();
 /// Global startup timestamp for calculating session uptime in exit events.
 /// Set during app setup, used to compute `uptime_s` in rust_exit{normal}.
 static STARTED_AT: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Global app handle for main thread probe.
+/// Used by watchdog diagnostics to distinguish webview hangs from main thread hangs.
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
 
 /// Tracks the exit reason and "via" field for normal exits.
 /// Set by quit paths (command, tray, window close), consumed by RunEvent::Exit.
@@ -387,6 +392,15 @@ fn analytics_identity() -> Result<Value, String> {
     Ok(identity_payload(install_id, session_id))
 }
 
+/// Heartbeat ping from webview (async fn per architecture decision #5).
+/// Called every 15 seconds from JS to prove webview responsiveness.
+/// Updates the watchdog's last_heartbeat timestamp.
+#[tauri::command]
+async fn heartbeat_ping() -> Result<(), String> {
+    watchdog::Watchdog::global().record_heartbeat();
+    Ok(())
+}
+
 #[tauri::command]
 async fn run_task(task: String) -> Result<(), String> {
     posthog_capture(Event::TaskRun, serde_json::json!({ "task": task }));
@@ -537,6 +551,7 @@ pub fn run() {
             // The plugin will automatically exit the second instance after this callback
             if let Some(panel) = app.get_webview_window("panel") {
                 let _ = panel.show();
+                watchdog::Watchdog::global().set_visibility(true);
                 let _ = panel.set_focus();
                 // Emit panel_open{via:'reopen'} so analytics tracks reopen events
                 // (fix-reopen-panel-open: single-instance callback补发 panel_open)
@@ -552,7 +567,8 @@ pub fn run() {
             open_logs_dir,
             quit_app,
             check_update,
-            analytics_identity
+            analytics_identity,
+            heartbeat_ping
         ])
         .setup(|app| {
             // Hide Dock icon (macOS only)
@@ -568,6 +584,11 @@ pub fn run() {
             // Record startup time for session duration calculation on exit
             STARTED_AT.set(std::time::Instant::now())
                 .expect("STARTED_AT already initialized");
+            
+            // Store app handle for main thread probe (M4 watchdog diagnostics)
+            APP_HANDLE
+                .set(app.handle().clone())
+                .expect("APP_HANDLE already initialized");
 
             // Initialize identity before any analytics events.
             // FIX (fix-m1-review-findings): graceful degradation instead of .expect.
@@ -647,6 +668,60 @@ pub fn run() {
                 std::thread::sleep(std::time::Duration::from_secs(5 * 60));
                 let seq = RUST_HEARTBEAT_SEQ.next();
                 posthog_capture(Event::RustHeartbeat, serde_json::json!({"seq": seq}));
+            });
+
+            // Watchdog: detect webview/main thread hangs (M4 diagnostics)
+            // JS side sends heartbeat_ping every 15s via invoke
+            // Rust checks every 5s with 45s threshold, requires 2 consecutive timeouts
+            // State machine: Healthy → Unresponsive → Recovered
+            // Emits events only on state transitions
+            std::thread::spawn(|| {
+                let wd = watchdog::Watchdog::global();
+                wd.start_monitoring_loop(|transition| {
+                    match transition {
+                        watchdog::WatchdogTransition::Unresponsive { missed_beats, threshold_s } => {
+                            posthog_capture(
+                                Event::DiagWebviewUnresponsive,
+                                serde_json::json!({
+                                    "missed_js_beats": missed_beats,
+                                    "threshold_s": threshold_s,
+                                    "error_code": "E_WEBVIEW_UNRESPONSIVE",
+                                }),
+                            );
+                        }
+                        watchdog::WatchdogTransition::Recovered { freeze_duration_ms } => {
+                            posthog_capture(
+                                Event::DiagWebviewRecovered,
+                                serde_json::json!({
+                                    "freeze_duration_ms": freeze_duration_ms,
+                                    "error_code": "E_WEBVIEW_RECOVERED",
+                                }),
+                            );
+                        }
+                        watchdog::WatchdogTransition::MainThreadUnresponsive { stalled_ms } => {
+                            posthog_capture(
+                                Event::DiagNativeMainUnresponsive,
+                                serde_json::json!({
+                                    "stalled_ms": stalled_ms,
+                                    "error_code": "E_MAIN_THREAD_UNRESPONSIVE",
+                                }),
+                            );
+                        }
+                    }
+                });
+            });
+
+            // Main thread probe (M4 diagnostics)
+            // Uses run_on_main_thread to execute a closure that updates a timestamp
+            // If the timestamp is stale, the main thread is unresponsive
+            let app_handle_for_probe = app.handle().clone();
+            std::thread::spawn(move || {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    let _ = app_handle_for_probe.run_on_main_thread(|| {
+                        watchdog::Watchdog::global().record_main_thread_probe();
+                    });
+                }
             });
 
             // Auto-update: check at startup, then every 6h. Silent download +
@@ -732,6 +807,7 @@ pub fn run() {
                         // Toggle: if visible, hide
                         if panel.is_visible().unwrap_or(false) {
                             let _ = panel.hide();
+                            watchdog::Watchdog::global().set_visibility(false);
                             // Native-side interaction proof, independent of the
                             // webview: during a hang, tray_click keeps flowing
                             // while $autocapture/panel_open stop → webview hang.
@@ -769,6 +845,7 @@ pub fn run() {
                         // Order: set_position → show → set_focus
                         let _ = panel.set_position(Position::Physical(PhysicalPosition::new(x, y)));
                         let _ = panel.show();
+                        watchdog::Watchdog::global().set_visibility(true);
                         let _ = panel.set_focus();
                         posthog_capture(Event::PanelOpen, serde_json::json!({ 
                             "via": "tray",
@@ -789,6 +866,7 @@ pub fn run() {
                     // Prevents double-send when tray already closed the panel
                     if panel_for_blur.is_visible().unwrap_or(false) {
                         let _ = panel_for_blur.hide();
+                        watchdog::Watchdog::global().set_visibility(false);
                         posthog_capture(Event::PanelClose, serde_json::json!({ 
                             "via": "blur",
                             "panel_id": get_panel_id(),
@@ -798,6 +876,7 @@ pub fn run() {
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     let _ = panel_for_blur.hide();
+                    watchdog::Watchdog::global().set_visibility(false);
                     posthog_capture(Event::PanelClose, serde_json::json!({ 
                         "via": "close",
                         "panel_id": get_panel_id(),
@@ -855,6 +934,82 @@ pub fn run() {
                             }
                         }
                     }
+                });
+            }
+
+            // freeze_webview diagnostic hook (M4 watchdog diagnostics, VAL-DIAG-001)
+            // Spawns a thread that waits for panel visibility, then injects a JS
+            // infinite loop via panel.eval() to freeze the webview event loop.
+            // This stops heartbeat_ping from being sent, triggering diag_webview_unresponsive.
+            // After 90s the JS is unfrozen (eval returns), allowing recovery detection.
+            if std::env::var("MENCBO_DIAG_TEST").map(|v| v == "freeze_webview").unwrap_or(false)
+                && !cfg!(debug_assertions)
+            {
+                let panel_for_freeze = panel.clone();
+                std::thread::spawn(move || {
+                    let mut checks = 0;
+                    // Wait up to 60s for panel to become visible
+                    loop {
+                        if let Ok(is_visible) = panel_for_freeze.is_visible() {
+                            if is_visible {
+                                break;
+                            }
+                        }
+                        checks += 1;
+                        if checks > 600 {
+                            eprintln!("[diag] freeze_webview: timeout waiting for panel visibility");
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    // Panel is visible, inject infinite loop to freeze JS event loop
+                    eprintln!("[diag] freeze_webview: injecting JS infinite loop (90s freeze)");
+                    // Use eval to inject a synchronous infinite loop
+                    // We use a self-terminating version that runs for ~90s then stops
+                    let _ = panel_for_freeze.eval(
+                        "(function(){ var start=Date.now(); while(Date.now()-start<90000){} })()"
+                    );
+                    eprintln!("[diag] freeze_webview: JS infinite loop completed (90s elapsed)");
+                });
+            }
+
+            // block_main diagnostic hook (M4 watchdog diagnostics, VAL-DIAG-004)
+            // Spawns a thread that waits for panel visibility, then blocks the Rust
+            // main thread via run_on_main_thread. This prevents the watchdog's main
+            // thread probe from being serviced, triggering diag_native_main_unresponsive.
+            if std::env::var("MENCBO_DIAG_TEST").map(|v| v == "block_main").unwrap_or(false)
+                && !cfg!(debug_assertions)
+            {
+                let panel_for_block = panel.clone();
+                let app_handle_for_block = app.handle().clone();
+                std::thread::spawn(move || {
+                    let mut checks = 0;
+                    // Wait up to 60s for panel to become visible
+                    loop {
+                        if let Ok(is_visible) = panel_for_block.is_visible() {
+                            if is_visible {
+                                break;
+                            }
+                        }
+                        checks += 1;
+                        if checks > 600 {
+                            eprintln!("[diag] block_main: timeout waiting for panel visibility");
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    // Panel is visible, block the main thread for 90s
+                    eprintln!("[diag] block_main: blocking main thread for 90s");
+                    // Use run_on_main_thread to execute a blocking closure on the main thread
+                    let handle = app_handle_for_block.clone();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let _ = handle.run_on_main_thread(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(90));
+                        let _ = tx.send(());
+                    });
+                    // Wait for the main thread to finish blocking
+                    let _ = rx.recv();
+                    eprintln!("[diag] block_main: main thread unblocked after 90s");
                 });
             }
 
@@ -1022,19 +1177,27 @@ fn check_diag_test_hook() {
         if let Some(mode) = parse_diag_test_mode(&diag_mode) {
             match mode {
                 DiagTestMode::FreezeWebview => {
-                    // Skeleton: M4 will implement webview freeze injection
-                    eprintln!("[diag] MENCBO_DIAG_TEST=freeze_webview detected (skeleton, no-op for now)");
+                    // M4 implementation: Inject JS infinite loop after panel becomes visible.
+                    // This blocks the JS event loop, preventing heartbeat_ping from being sent.
+                    // The Rust watchdog thread detects the missing heartbeats and emits
+                    // diag_webview_unresponsive (VAL-DIAG-001).
+                    eprintln!("[diag] MENCBO_DIAG_TEST=freeze_webview: will inject JS infinite loop after panel visibility");
+                    // Actual implementation is in the close_panel-style thread below
                 }
                 DiagTestMode::BlockMain => {
-                    // Skeleton: M4 will implement main thread block injection
-                    eprintln!("[diag] MENCBO_DIAG_TEST=block_main detected (skeleton, no-op for now)");
+                    // M4 implementation: Block the Rust main thread after panel becomes visible.
+                    // This prevents the run_on_main_thread probe callback from executing,
+                    // causing the watchdog to detect main thread unresponsiveness and emit
+                    // diag_native_main_unresponsive (VAL-DIAG-004).
+                    eprintln!("[diag] MENCBO_DIAG_TEST=block_main: will block main thread after panel visibility");
+                    // Actual implementation is in the close_panel-style thread below
                 }
                 DiagTestMode::SlowIpc => {
-                    // Skeleton: M4 will implement slow IPC injection
+                    // Skeleton: future M4 will implement slow IPC injection
                     eprintln!("[diag] MENCBO_DIAG_TEST=slow_ipc detected (skeleton, no-op for now)");
                 }
                 DiagTestMode::Panic => {
-                    // Skeleton: M4 will implement panic injection
+                    // Skeleton: future M4 will implement panic injection
                     eprintln!("[diag] MENCBO_DIAG_TEST=panic detected (skeleton, no-op for now)");
                 }
                 DiagTestMode::ClosePanel => {
