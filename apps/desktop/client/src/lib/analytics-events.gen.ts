@@ -24,12 +24,22 @@ export interface AppEventMap {
   diag_identity_failed: {
     reason: string;
   };
+  diag_ipc_timeout: {
+    command: string;
+    error_code: string;
+    timeout_ms: number;
+  };
   diag_logs_open_failed: {
     error: string;
     stage: string;
   };
   diag_native_main_unresponsive: {
     error_code: string;
+  };
+  diag_rust_panic: {
+    backtrace: string;
+    error_code: string;
+    message: string;
   };
   diag_state_load_failed: {
     reason: string;
