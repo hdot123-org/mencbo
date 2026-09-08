@@ -46,6 +46,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: node apps/desktop/analytics/check-imports.mjs
       - run: pnpm -F desktop-client exec tsc --noEmit
       - run: pnpm -F desktop-client test
 
