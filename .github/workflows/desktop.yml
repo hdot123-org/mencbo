@@ -46,6 +46,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: node apps/desktop/analytics/check-imports.mjs
       - run: node apps/desktop/analytics/codegen.mjs
       - run: git diff --exit-code -- apps/desktop/client/src/lib/analytics-events.gen.ts apps/desktop/client/src-tauri/src/analytics_events_gen.rs
       - run: pnpm -F desktop-client exec tsc --noEmit
