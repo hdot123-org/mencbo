@@ -3,6 +3,7 @@ mod identity;
 mod session_marker;
 mod analytics_events_gen;
 mod watchdog;
+mod panic_sender;
 
 use serde_json::Value;
 use tauri::{
@@ -401,6 +402,26 @@ async fn heartbeat_ping() -> Result<(), String> {
     Ok(())
 }
 
+/// Slow IPC command for testing timeout detection (VAL-DIAG-005).
+/// This command sleeps for 10 seconds to simulate slow IPC response.
+/// Used by MENCBO_DIAG_TEST=slow_ipc to verify JS-side IPC timeout detection.
+#[tauri::command]
+async fn slow_ipc() -> Result<(), String> {
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    Ok(())
+}
+
+/// Return the MENCBO_DIAG_TEST environment variable value (or empty string if not set).
+/// Used by JS side to know which diagnostic mode is active.
+/// Only returns a non-empty value in release builds.
+#[tauri::command]
+fn get_diag_test_mode() -> String {
+    if cfg!(debug_assertions) {
+        return String::new();
+    }
+    std::env::var("MENCBO_DIAG_TEST").unwrap_or_default()
+}
+
 #[tauri::command]
 async fn run_task(task: String) -> Result<(), String> {
     posthog_capture(Event::TaskRun, serde_json::json!({ "task": task }));
@@ -568,7 +589,9 @@ pub fn run() {
             quit_app,
             check_update,
             analytics_identity,
-            heartbeat_ping
+            heartbeat_ping,
+            slow_ipc,
+            get_diag_test_mode
         ])
         .setup(|app| {
             // Hide Dock icon (macOS only)
@@ -637,6 +660,40 @@ pub fn run() {
             // Uses a blocking thread for periodic flush (20 items or 60s).
             // Global singleton reqwest::blocking::Client is created here and reused.
             analytics::init(POSTHOG_KEY, POSTHOG_HOST);
+
+            // Install panic hook for VAL-DIAG-006 (diag_rust_panic synchronous send).
+            // Must be done after analytics::init() so we have identity and config.
+            // The hook sends panic events synchronously via panic_sender, bypassing batch queue.
+            let panic_identity = IDENTITY.get().cloned();
+            let panic_key = POSTHOG_KEY.to_string();
+            let panic_host = POSTHOG_HOST.to_string();
+            std::panic::set_hook(Box::new(move |info| {
+                // Extract panic message
+                let message = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+
+                // Capture backtrace (requires RUST_BACKTRACE=1)
+                let backtrace = std::backtrace::Backtrace::capture().to_string();
+
+                // Send synchronously via panic_sender (bypasses batch queue)
+                if let Some((install_id, session_id)) = panic_identity.as_ref() {
+                    panic_sender::send_panic_event(
+                        &panic_key,
+                        &panic_host,
+                        install_id,
+                        session_id,
+                        &message,
+                        &backtrace,
+                    );
+                } else {
+                    eprintln!("[panic_hook] no identity available, cannot send panic event");
+                }
+            }));
 
             // Emit dirty exit event if previous session didn't exit cleanly
             // This must happen after analytics::init() so the event can be queued
@@ -1013,6 +1070,37 @@ pub fn run() {
                 });
             }
 
+            // panic diagnostic hook (VAL-DIAG-006)
+            // Spawns a thread that waits for panel visibility, then triggers a controlled panic.
+            // The panic hook (installed above) sends diag_rust_panic synchronously via panic_sender.
+            // Process will abort after sending the event (expected behavior).
+            if std::env::var("MENCBO_DIAG_TEST").map(|v| v == "panic").unwrap_or(false)
+                && !cfg!(debug_assertions)
+            {
+                let panel_for_panic = panel.clone();
+                std::thread::spawn(move || {
+                    let mut checks = 0;
+                    // Wait up to 60s for panel to become visible
+                    loop {
+                        if let Ok(is_visible) = panel_for_panic.is_visible() {
+                            if is_visible {
+                                break;
+                            }
+                        }
+                        checks += 1;
+                        if checks > 600 {
+                            eprintln!("[diag] panic: timeout waiting for panel visibility");
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    // Panel is visible, wait a moment then trigger panic
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    eprintln!("[diag] panic: triggering controlled panic for VAL-DIAG-006");
+                    panic!("MENCBO_DIAG_TEST=panic: controlled panic for diag_rust_panic validation");
+                });
+            }
+
             // File watcher for state.json → emit state-changed.
             // FIX 4: Watch the *parent directory* instead of the file itself.
             // - No pre-write: we must NEVER write to ~/.mencbo/state.json at startup
@@ -1193,12 +1281,18 @@ fn check_diag_test_hook() {
                     // Actual implementation is in the close_panel-style thread below
                 }
                 DiagTestMode::SlowIpc => {
-                    // Skeleton: future M4 will implement slow IPC injection
-                    eprintln!("[diag] MENCBO_DIAG_TEST=slow_ipc detected (skeleton, no-op for now)");
+                    // Implementation: slow_ipc command is registered in invoke_handler.
+                    // JS side wraps invoke('slow_ipc') with a timeout. When timeout fires
+                    // before the command returns, JS emits diag_ipc_timeout.
+                    // The command sleeps for 10s; JS timeout is 3s.
+                    eprintln!("[diag] MENCBO_DIAG_TEST=slow_ipc: slow_ipc command registered, JS will invoke with timeout");
                 }
                 DiagTestMode::Panic => {
-                    // Skeleton: future M4 will implement panic injection
-                    eprintln!("[diag] MENCBO_DIAG_TEST=panic detected (skeleton, no-op for now)");
+                    // Implementation: spawn a thread that triggers a controlled panic
+                    // after panel becomes visible. The panic hook sends diag_rust_panic
+                    // synchronously via panic_sender (VAL-DIAG-006).
+                    eprintln!("[diag] MENCBO_DIAG_TEST=panic: will trigger controlled panic after panel visibility");
+                    // Actual implementation in the panel setup section below
                 }
                 DiagTestMode::ClosePanel => {
                     // Implementation: spawn a thread that waits for panel visibility,

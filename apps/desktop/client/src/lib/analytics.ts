@@ -36,6 +36,64 @@ const eventBuffer: Array<{ event: string; props?: Record<string, unknown> }> = [
 const recentCaptures = new Map<string, number>();
 
 /**
+ * IPC invoke wrapper with timeout detection (VAL-DIAG-005).
+ * Wraps invoke() calls with a configurable timeout. If the invoke exceeds
+ * the timeout threshold, emits a diag_ipc_timeout event and rejects.
+ *
+ * @param command - The Tauri command name to invoke
+ * @param args - Arguments to pass to the command
+ * @param timeoutMs - Timeout in milliseconds (default 3000)
+ * @returns Promise that resolves with the command result
+ * @throws Error if the invoke times out
+ */
+export async function invokeWithTimeout<T>(
+  command: string,
+  args?: Record<string, unknown>,
+  timeoutMs: number = 3000
+): Promise<T> {
+  const start = Date.now();
+
+  return new Promise<T>((resolve, reject) => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let settled = false;
+
+    const invokePromise = invoke<T>(command, args);
+
+    // Set up timeout
+    timeoutId = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        const elapsed = Date.now() - start;
+        capture("diag_ipc_timeout", {
+          error_code: "E_IPC_TIMEOUT",
+          timeout_ms: elapsed,
+          command: command,
+        });
+        reject(new Error(`IPC timeout: ${command} exceeded ${timeoutMs}ms`));
+      }
+    }, timeoutMs);
+
+    // Handle invoke completion
+    invokePromise.then(
+      (result) => {
+        if (!settled) {
+          settled = true;
+          if (timeoutId) clearTimeout(timeoutId);
+          resolve(result);
+        }
+      },
+      (error) => {
+        if (!settled) {
+          settled = true;
+          if (timeoutId) clearTimeout(timeoutId);
+          reject(error);
+        }
+      }
+    );
+  });
+}
+
+/**
  * Initialize PostHog analytics with unified identity from Rust.
  *
  * Environment gating: import.meta.env.DEV returns early (VAL-ENV-001).
@@ -195,6 +253,19 @@ export async function initAnalytics() {
 
     // js_launch — now that posthog is initialized
     capture("js_launch", {});
+
+    // Diagnostic test hook: slow_ipc (VAL-DIAG-005)
+    // If MENCBO_DIAG_TEST=slow_ipc, invoke slow_ipc command with timeout wrapper.
+    // The command sleeps for 10s; our 3s timeout fires first → diag_ipc_timeout event.
+    if (analyticsReady) {
+      const diagMode = await invoke<string>("get_diag_test_mode").catch(() => "");
+      if (diagMode === "slow_ipc") {
+        console.log("[diag] slow_ipc: invoking slow_ipc with 3s timeout");
+        invokeWithTimeout<void>("slow_ipc", {}, 3000).catch((e) => {
+          console.warn("[diag] slow_ipc timeout fired:", e);
+        });
+      }
+    }
   }
 
   // Step 5: ALWAYS register error listeners and heartbeat, regardless of

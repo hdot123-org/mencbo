@@ -16,8 +16,10 @@ pub enum Event {
     AppUpdateFailed,
     AppUpdateInstalled,
     DiagIdentityFailed,
+    DiagIpcTimeout,
     DiagLogsOpenFailed,
     DiagNativeMainUnresponsive,
+    DiagRustPanic,
     DiagStateLoadFailed,
     DiagTaskSpawnFailed,
     DiagWebviewRecovered,
@@ -71,6 +73,14 @@ pub struct DiagIdentityFailedProps {
     pub reason: String,
 }
 
+/// Properties for diag_ipc_timeout event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagIpcTimeoutProps {
+    pub command: String,
+    pub error_code: String,
+    pub timeout_ms: f64,
+}
+
 /// Properties for diag_logs_open_failed event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagLogsOpenFailedProps {
@@ -82,6 +92,14 @@ pub struct DiagLogsOpenFailedProps {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagNativeMainUnresponsiveProps {
     pub error_code: String,
+}
+
+/// Properties for diag_rust_panic event
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagRustPanicProps {
+    pub backtrace: String,
+    pub error_code: String,
+    pub message: String,
 }
 
 /// Properties for diag_state_load_failed event
@@ -196,8 +214,10 @@ impl Event {
             Event::AppUpdateFailed => "app_update_failed",
             Event::AppUpdateInstalled => "app_update_installed",
             Event::DiagIdentityFailed => "diag_identity_failed",
+            Event::DiagIpcTimeout => "diag_ipc_timeout",
             Event::DiagLogsOpenFailed => "diag_logs_open_failed",
             Event::DiagNativeMainUnresponsive => "diag_native_main_unresponsive",
+            Event::DiagRustPanic => "diag_rust_panic",
             Event::DiagStateLoadFailed => "diag_state_load_failed",
             Event::DiagTaskSpawnFailed => "diag_task_spawn_failed",
             Event::DiagWebviewRecovered => "diag_webview_recovered",

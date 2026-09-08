@@ -226,6 +226,26 @@ events:
       error_code: string
     description: Native main thread blocked (run_on_main_thread timeout)
 
+  diag_ipc_timeout:
+    layer: webview
+    status: active
+    props:
+      error_code: string  # E_IPC_TIMEOUT
+      timeout_ms: number
+      command: string
+    description: JS invoke() exceeded timeout threshold (VAL-DIAG-005)
+
+  diag_rust_panic:
+    layer: rust
+    status: active
+    props:
+      message: string  # Truncated to ≤300 chars
+      backtrace: string  # Backtrace summary
+      error_code: string  # E_RUST_PANIC
+    description: >
+      Rust panic detected — sent synchronously from panic hook via blocking reqwest
+      (bypasses batch queue, works under panic=abort). Process aborts after send (VAL-DIAG-006).
+
   # === Deprecated Events (old names) ===
   quit:
     layer: rust
