@@ -63,3 +63,20 @@ If the diff is large, scan for P0/P1 issues first, then P2/P3 only if budget rem
 - If the diff is empty or no files are provided, return `{"shard_id": <id>, "findings": []}`.
 - Do not fabricate findings for code not shown in the diff.
 - Be precise with line numbers — they must match the diff context.
+
+## Machine-Checkable Rules
+
+In addition to the general review guidelines above, apply the following machine-checkable rule:
+
+### Rule 1: Analytics Coverage for Tauri Commands
+
+**Check:** If the diff adds new `#[tauri::command]` functions or new entries to `invoke_handler`, verify that corresponding analytics tracking is present.
+
+**Severity:** Medium (P2)
+
+**Detection:** 
+- Look for additions of `#[tauri::command]` or new command registrations in `invoke_handler`
+- Check if there are corresponding `posthog_capture(Event::...)` calls for these commands
+- If commands are added but no analytics tracking is visible in the diff, flag as Medium
+
+**Rationale:** All user-facing Tauri commands should have analytics coverage to track usage patterns and detect issues. Missing analytics makes it impossible to understand feature adoption or debug problems in production.
