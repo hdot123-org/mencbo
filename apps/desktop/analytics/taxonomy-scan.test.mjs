@@ -1,5 +1,5 @@
 /**
- * Regression tests for the taxonomy drift scanner (INFRA-905).
+ * Regression tests for the taxonomy drift scanner (INFRA-905, INFRA-908).
  *
  * The security-critical property under test: the scanner never builds shell
  * command strings. All gh invocations are argv arrays passed to execFileSync,
@@ -13,11 +13,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   _setGhRunnerForTests,
+  closeDriftIssue,
   computeDrift,
   createDriftIssue,
   driftIssueTitle,
   findExistingIssue,
   isPostHogSystemEvent,
+  listOpenDriftIssues,
+  parseDriftEventName,
+  resolveDriftIssueAction,
+  reopenDriftIssue,
 } from './taxonomy-scan.mjs';
 
 const SCANNER_SRC = fs.readFileSync(
@@ -143,4 +148,158 @@ test('createDriftIssue propagates gh failures', () => {
 
 test('driftIssueTitle format is stable (idempotency contract)', () => {
   assert.equal(driftIssueTitle('x'), "Taxonomy drift: unregistered event 'x'");
+});
+
+test('parseDriftEventName inverts driftIssueTitle exactly', () => {
+  assert.equal(parseDriftEventName(driftIssueTitle('rust_launch')), 'rust_launch');
+  // Hostile names round-trip: quotes stay part of one argv-safe token
+  assert.equal(parseDriftEventName(driftIssueTitle(`a'; $(id)`)), `a'; $(id)`);
+  // Foreign or malformed titles are rejected (never lifecycle-managed)
+  assert.equal(parseDriftEventName('Some other title'), null);
+  assert.equal(parseDriftEventName('Taxonomy drift: unregistered event'), null);
+  assert.equal(parseDriftEventName("Taxonomy drift: unregistered event ''"), null);
+  assert.equal(parseDriftEventName('Taxonomy drift: unregistered event typo'), null);
+  assert.equal(parseDriftEventName(null), null);
+  assert.equal(parseDriftEventName(42), null);
+});
+
+test('resolveDriftIssueAction keeps issues for ongoing drift', () => {
+  const action = resolveDriftIssueAction('typo_evnt', {
+    driftSet: new Set(['typo_evnt']),
+    registeredSet: new Set(),
+    online7d: new Set(['typo_evnt']),
+  });
+  assert.equal(action, null);
+});
+
+test('resolveDriftIssueAction closes by registration with an explanatory reason', () => {
+  const action = resolveDriftIssueAction('new_event', {
+    driftSet: new Set(),
+    registeredSet: new Set(['new_event']),
+    online7d: new Set(['new_event']),
+  });
+  assert.ok(action.close.includes('registered'));
+  assert.ok(action.close.includes('new_event'));
+});
+
+test('resolveDriftIssueAction closes when the event is no longer observed', () => {
+  const action = resolveDriftIssueAction('drift_probe_r5_1788910013', {
+    driftSet: new Set(),
+    registeredSet: new Set(),
+    online7d: new Set(),
+  });
+  assert.ok(action.close.includes('no longer observed'));
+  assert.ok(action.close.includes('drift_probe_r5_1788910013'));
+});
+
+test('resolveDriftIssueAction keeps issues for observed-but-excluded events', () => {
+  // e.g. a manually-filed issue for a $ system event: observed online,
+  // excluded from drift, unregistered — the scanner must not close an
+  // issue for an event it does not track.
+  const action = resolveDriftIssueAction('$pageview', {
+    driftSet: new Set(),
+    registeredSet: new Set(),
+    online7d: new Set(['$pageview']),
+  });
+  assert.equal(action, null);
+});
+
+test('listOpenDriftIssues queries open issues with the drift label', () => {
+  let recorded;
+  _setGhRunnerForTests((args) => {
+    recorded = args;
+    return JSON.stringify([
+      { number: 79, title: driftIssueTitle('drift_probe_r4_xyz') },
+      { number: 82, title: driftIssueTitle('drift_probe_r5_1788910013') },
+    ]);
+  });
+  try {
+    const issues = listOpenDriftIssues();
+    assert.equal(issues.length, 2);
+    assert.equal(recorded[recorded.indexOf('--state') + 1], 'open');
+    assert.equal(recorded[recorded.indexOf('--label') + 1], 'taxonomy-drift');
+  } finally {
+    _setGhRunnerForTests(undefined);
+  }
+});
+
+test('listOpenDriftIssues propagates gh failures', () => {
+  _setGhRunnerForTests(() => {
+    const err = new Error('gh failed');
+    err.stderr = Buffer.from('gh: Could not parse json');
+    throw err;
+  });
+  try {
+    assert.throws(() => listOpenDriftIssues(), /Could not parse json/);
+  } finally {
+    _setGhRunnerForTests(undefined);
+  }
+});
+
+test('closeDriftIssue passes number and comment as discrete argv', () => {
+  let recorded;
+  _setGhRunnerForTests((args) => {
+    recorded = args;
+    return '';
+  });
+  try {
+    closeDriftIssue(82, 'Event `x; y` $(id) is now registered in `events.yml`; drift resolved.');
+    assert.equal(recorded[recorded.indexOf('close') + 1], '82');
+    // Comment with shell metacharacters stays a single argv element
+    const comment = recorded[recorded.indexOf('--comment') + 1];
+    assert.ok(comment.includes('`x; y` $(id)'));
+    assert.ok(comment.includes('_Closed by taxonomy-scan workflow_'));
+    for (const arg of recorded) {
+      assert.equal(typeof arg, 'string');
+    }
+  } finally {
+    _setGhRunnerForTests(undefined);
+  }
+});
+
+test('closeDriftIssue propagates gh failures', () => {
+  _setGhRunnerForTests(() => {
+    const err = new Error('gh failed');
+    err.stderr = Buffer.from('gh: issue close failed: permission denied');
+    throw err;
+  });
+  try {
+    assert.throws(() => closeDriftIssue(82, 'reason'), /permission denied/);
+  } finally {
+    _setGhRunnerForTests(undefined);
+  }
+});
+
+test('reopenDriftIssue passes hostile event names as discrete argv', () => {
+  const hostile = `foo'; $(rm -rf /tmp/pwn); \`id\``;
+  let recorded;
+  _setGhRunnerForTests((args) => {
+    recorded = args;
+    return '';
+  });
+  try {
+    reopenDriftIssue(11, hostile);
+    assert.equal(recorded[recorded.indexOf('reopen') + 1], '11');
+    const comment = recorded[recorded.indexOf('--comment') + 1];
+    assert.ok(comment.includes(hostile));
+    assert.ok(comment.includes('_Reopened by taxonomy-scan workflow_'));
+    for (const arg of recorded) {
+      assert.equal(typeof arg, 'string');
+    }
+  } finally {
+    _setGhRunnerForTests(undefined);
+  }
+});
+
+test('findExistingIssue surfaces issue state for lifecycle decisions', () => {
+  _setGhRunnerForTests(() =>
+    JSON.stringify([{ number: 13, title: driftIssueTitle('gone_evnt'), state: 'CLOSED' }]),
+  );
+  try {
+    const existing = findExistingIssue('gone_evnt');
+    assert.equal(existing?.number, 13);
+    assert.equal(existing?.state, 'CLOSED');
+  } finally {
+    _setGhRunnerForTests(undefined);
+  }
 });

@@ -5,10 +5,14 @@
  *
  * Modes:
  * - Live: POSTHOG_PERSONAL_API_KEY set + DRY_RUN != 'true'
- *   Queries PostHog, reports drift/dead/silent, creates GitHub issues for drift.
+ *   Queries PostHog, reports drift/dead/silent, creates GitHub issues for
+ *   drift, and manages the drift-issue lifecycle (INFRA-908): open issues
+ *   whose event has been registered or is no longer observed are closed
+ *   with an explanatory comment; closed issues whose event drifts again
+ *   are reopened instead of being silently suppressed.
  * - Dry-run: secret missing or DRY_RUN=true
- *   Queries PostHog if key available but never creates issues.
- *   If key missing, outputs registry summary only.
+ *   Queries PostHog if key available but never creates/closes/reopens
+ *   issues. If key missing, outputs registry summary only.
  *
  * Scanner discipline: no automatic PRs — issues only.
  *
@@ -21,6 +25,9 @@
  * - Idempotency lookups distinguish "checked, none found" from "check
  *   failed"; a failed check aborts that event's issue creation rather than
  *   risking duplicates.
+ * - Lifecycle mutations (close/reopen) apply only to issues whose title
+ *   matches the canonical drift format exactly; foreign issues carrying
+ *   the taxonomy-drift label are left untouched.
  */
 
 import fs from 'fs';
@@ -187,7 +194,47 @@ export function driftIssueTitle(eventName) {
 }
 
 /**
+ * Inverse of driftIssueTitle: extract the event name from a canonical drift
+ * issue title. Returns null for titles that do not match the canonical
+ * format exactly — foreign issues carrying the taxonomy-drift label must
+ * never be lifecycle-managed by the scanner (INFRA-908).
+ */
+export function parseDriftEventName(title) {
+  if (typeof title !== 'string') return null;
+  const prefix = "Taxonomy drift: unregistered event '";
+  if (!title.startsWith(prefix) || !title.endsWith("'")) return null;
+  const name = title.slice(prefix.length, title.length - 1);
+  return name.length > 0 ? name : null;
+}
+
+/**
+ * Decide the lifecycle action for an open drift issue given current scan
+ * data (INFRA-908). Returns null when the issue must stay open, or
+ * { close: <reason> } when the reported drift has resolved:
+ * - event still in the current drift set -> keep (drift ongoing)
+ * - event registered (active or deprecated) -> close (resolved by registration)
+ * - event observed online but excluded from drift (e.g. $ system event) ->
+ *   keep (the scanner does not track it; leave the issue to humans)
+ * - event absent from the 7-day online window -> close (emission stopped
+ *   or transient probe aged out)
+ */
+export function resolveDriftIssueAction(eventName, { driftSet, registeredSet, online7d }) {
+  if (driftSet.has(eventName)) return null;
+  if (registeredSet.has(eventName)) {
+    return {
+      close: `Event \`${eventName}\` is now registered in \`events.yml\`; drift resolved.`,
+    };
+  }
+  if (online7d.has(eventName)) return null;
+  return {
+    close: `Event \`${eventName}\` is no longer observed in PostHog (last 7 days); drift resolved.`,
+  };
+}
+
+/**
  * Check if a GitHub issue already exists for a drift event (idempotent).
+ * Returns the issue's state so the caller can distinguish "open, skip"
+ * from "closed, reopen" (INFRA-908).
  * Throws on gh failure (auth, network, permissions) so the caller can
  * distinguish "checked, none found" from "check failed".
  */
@@ -197,7 +244,7 @@ export function findExistingIssue(eventName) {
     '--state', 'all',
     '--label', 'taxonomy-drift',
     '--search', `"${eventName}" in:title`,
-    '--json', 'number,title',
+    '--json', 'number,title,state',
     '--limit', '20',
   ]);
   const issues = JSON.parse(raw || '[]');
@@ -260,6 +307,46 @@ export function createDriftIssue(eventName) {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/**
+ * List open issues labeled taxonomy-drift. Throws on gh failure.
+ */
+export function listOpenDriftIssues() {
+  const raw = ghExec([
+    'issue', 'list',
+    '--state', 'open',
+    '--label', 'taxonomy-drift',
+    '--json', 'number,title',
+    '--limit', '100',
+  ]);
+  return JSON.parse(raw || '[]');
+}
+
+/**
+ * Close a resolved drift issue with an explanatory comment (INFRA-908).
+ * The comment travels as a single discrete argv element — no shell.
+ * Throws on gh failure.
+ */
+export function closeDriftIssue(issueNumber, reason) {
+  return ghExec([
+    'issue', 'close', String(issueNumber),
+    '--comment', `${reason}\n\n_Closed by taxonomy-scan workflow_`,
+  ]);
+}
+
+/**
+ * Reopen a previously closed drift issue whose event drifted again
+ * (INFRA-908). Without this, the state-all idempotency lookup would
+ * permanently suppress re-reports for events that reappear later.
+ * Throws on gh failure.
+ */
+export function reopenDriftIssue(issueNumber, eventName) {
+  return ghExec([
+    'issue', 'reopen', String(issueNumber),
+    '--comment',
+    `Event \`${eventName}\` is observed in PostHog again (last 7 days) but still unregistered; reopening.\n\n_Reopened by taxonomy-scan workflow_`,
+  ]);
 }
 
 /**
@@ -370,10 +457,12 @@ async function main() {
   }
   log('');
 
-  // Issue creation for drift events (live mode only)
-  if (!dryRun && driftEvents.length > 0) {
-    log('Creating GitHub issues for drift events...');
-
+  // Issue lifecycle management (live mode only, INFRA-908):
+  // pass 1 creates (or reopens) issues for currently drifting events,
+  // pass 2 closes open drift issues whose drift has resolved.
+  let closedCount = 0;
+  let reopenedCount = 0;
+  if (!dryRun) {
     // Pre-flight: verify auth + repo + issue read before any mutation.
     // A credential failure here must fail the run loudly (INFRA-905).
     try {
@@ -381,41 +470,90 @@ async function main() {
       ensureDriftLabels();
     } catch (err) {
       log(`ERROR: GitHub pre-flight failed (auth/repo/labels): ${describeGhError(err)}`);
-      log('Aborting issue creation. Verify GH_TOKEN and issues: write permission, then re-run.');
+      log('Aborting issue lifecycle management. Verify GH_TOKEN and issues: write permission, then re-run.');
       process.exitCode = 1;
       return;
     }
 
     let failures = 0;
-    for (const eventName of driftEvents) {
-      let existing;
-      try {
-        existing = findExistingIssue(eventName);
-      } catch (err) {
-        failures += 1;
-        log(`  [FAIL] idempotency check for "${eventName}": ${describeGhError(err)}`);
-        continue;
+
+    // Pass 1: create or reopen issues for currently drifting events
+    if (driftEvents.length > 0) {
+      log('Creating GitHub issues for drift events...');
+      for (const eventName of driftEvents) {
+        let existing;
+        try {
+          existing = findExistingIssue(eventName);
+        } catch (err) {
+          failures += 1;
+          log(`  [FAIL] idempotency check for "${eventName}": ${describeGhError(err)}`);
+          continue;
+        }
+        if (existing) {
+          if (existing.state === 'OPEN') {
+            log(`  [SKIP] Issue #${existing.number} already exists for "${eventName}"`);
+          } else {
+            try {
+              reopenDriftIssue(existing.number, eventName);
+              reopenedCount += 1;
+              log(`  [REOPEN] Issue #${existing.number} reopened for "${eventName}"`);
+            } catch (err) {
+              failures += 1;
+              log(`  [FAIL] reopen #${existing.number} for "${eventName}": ${describeGhError(err)}`);
+            }
+          }
+          continue;
+        }
+        try {
+          const url = createDriftIssue(eventName);
+          log(`  [CREATED] ${url}`);
+        } catch (err) {
+          failures += 1;
+          log(`  [FAIL] create issue for "${eventName}": ${describeGhError(err)}`);
+        }
       }
-      if (existing) {
-        log(`  [SKIP] Issue #${existing.number} already exists for "${eventName}"`);
-        continue;
-      }
-      try {
-        const url = createDriftIssue(eventName);
-        log(`  [CREATED] ${url}`);
-      } catch (err) {
-        failures += 1;
-        log(`  [FAIL] create issue for "${eventName}": ${describeGhError(err)}`);
-      }
+      log('');
     }
 
+    // Pass 2: close open drift issues whose drift has resolved
+    log('Checking open drift issues for resolution...');
+    let openIssues;
+    try {
+      openIssues = listOpenDriftIssues();
+    } catch (err) {
+      failures += 1;
+      log(`  [FAIL] list open drift issues: ${describeGhError(err)}`);
+      openIssues = [];
+    }
+    const driftSet = new Set(driftEvents);
+    for (const issue of openIssues) {
+      const eventName = parseDriftEventName(issue.title);
+      if (!eventName) {
+        log(`  [SKIP] Issue #${issue.number} has a non-canonical title - leaving untouched`);
+        continue;
+      }
+      const action = resolveDriftIssueAction(eventName, { driftSet, registeredSet: allRegistered, online7d });
+      if (!action) {
+        log(`  [KEEP] Issue #${issue.number} for "${eventName}" (drift ongoing)`);
+        continue;
+      }
+      try {
+        closeDriftIssue(issue.number, action.close);
+        closedCount += 1;
+        log(`  [CLOSED] #${issue.number} for "${eventName}"`);
+      } catch (err) {
+        failures += 1;
+        log(`  [FAIL] close #${issue.number} for "${eventName}": ${describeGhError(err)}`);
+      }
+    }
+    log('');
+
     if (failures > 0) {
-      log('');
-      log(`ERROR: ${failures}/${driftEvents.length} drift issue operation(s) failed in live mode`);
+      log(`ERROR: ${failures} drift issue lifecycle operation(s) failed in live mode`);
       process.exitCode = 1;
     }
   } else if (dryRun && driftEvents.length > 0) {
-    log('Dry-run mode: skipping issue creation');
+    log('Dry-run mode: skipping issue creation and lifecycle management');
   }
 
   // Write GitHub Actions step summary
@@ -442,6 +580,12 @@ async function main() {
       silentDeprecated.length > 0
         ? silentDeprecated.map((e) => `- \`${e}\``).join('\n')
         : '_All deprecated events still have recent traffic_',
+      '',
+      '## Drift Issue Lifecycle',
+      '',
+      dryRun
+        ? '_Dry-run: issue lifecycle not attempted_'
+        : `${closedCount} resolved issue(s) closed, ${reopenedCount} reopened`,
       '',
     ].join('\n');
 
