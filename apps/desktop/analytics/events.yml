@@ -29,6 +29,10 @@ baseline_properties:
     type: string
     layer: both
     description: "Application version from tauri.conf.json (VAL-ENV-003)"
+  build_sha:
+    type: string
+    layer: both
+    description: "Build identifier (git commit SHA) injected at compile time by build.rs. fix-build-attribution: app_version alone cannot distinguish builds sharing a version number, which made fix-verification probes misattribute stale-build events to the fix commit (2026-09-09 diag_webview_unresponsive probe false alarm). Rust injects it in posthog_capture/panic_sender; webview receives it via analytics_identity bridge."
   environment:
     type: string
     layer: both

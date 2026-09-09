@@ -96,6 +96,14 @@ pub struct Watchdog {
     /// But the panel window may still be on-screen (is_visible=true).
     /// Before penalizing heartbeat misses, check if the app is focused.
     /// If not focused, WebKit suspension is expected → exempt from penalty.
+    ///
+    /// FIX (fix-focus-gate-edges): Defaults to FALSE (exempt-by-default).
+    /// The cross-check is only meaningful after a Focused(true) event has actually
+    /// been observed. If the panel is shown without activating the app (non-key
+    /// window) or focus events are missed, an unknown focus state must degrade to
+    /// exemption — the same failure direction as the #88 ruling — not to penalty.
+    /// A default of true silently reverts to pre-#88 behavior in exactly the
+    /// scenarios the cross-check was built for.
     app_focused: AtomicBool,
     /// Current state
     state: Mutex<WatchdogState>,
@@ -123,7 +131,9 @@ impl Watchdog {
         Self {
             last_heartbeat: Mutex::new(now),
             is_visible: AtomicBool::new(false),
-            app_focused: AtomicBool::new(true),
+            // FIX (fix-focus-gate-edges): exempt-by-default until Focused(true)
+            // is actually observed (see field docs)
+            app_focused: AtomicBool::new(false),
             state: Mutex::new(WatchdogState::Healthy),
             unresponsive_since: Mutex::new(None),
             consecutive_timeouts: Mutex::new(0),
@@ -179,8 +189,25 @@ impl Watchdog {
     /// Cross-check: if the panel is visible but the app is not focused, WebKit
     /// suspension is expected behavior. We exempt this case from heartbeat penalty
     /// to avoid false diag_webview_unresponsive.
+    ///
+    /// FIX (fix-focus-gate-edges): Regaining focus also resets the heartbeat
+    /// baseline (grace period), mirroring set_visibility(true). On refocus,
+    /// WebKit must resume the suspended WebContent process and the JS context
+    /// may be rebuilt from scratch (macOS App Nap suspension); the first
+    /// post-resume heartbeat_ping can take up to one heartbeat interval (~15s,
+    /// setInterval does not fire immediately). Without a grace period, the two
+    /// consecutive-check rule (5s apart) fires a false unresponsive→recovered
+    /// pair inside that resume window — the same false-positive shape the
+    /// 2026-09-08 visibility ruling prohibits. A genuine freeze is unaffected:
+    /// heartbeats stay absent, so unresponsive is simply delayed by one
+    /// threshold period after the click.
     pub fn set_app_focused(&self, focused: bool) {
         self.app_focused.store(focused, Ordering::SeqCst);
+        if focused {
+            // Grace period for WebKit resume + first JS heartbeat after refocus
+            *self.last_heartbeat.lock().unwrap() = Instant::now();
+            *self.consecutive_timeouts.lock().unwrap() = 0;
+        }
     }
 
     /// Query app focus state (used by diagnostics and tests).
@@ -460,6 +487,8 @@ mod tests {
     fn single_timeout_stays_healthy() {
         let wd = Watchdog::new();
         wd.set_visibility(true);
+        // fix-focus-gate-edges: penalty path requires observed focus (default is exempt)
+        wd.set_app_focused(true);
         // Set heartbeat to be older than threshold
         wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(1));
         assert!(wd.check().is_none());
@@ -471,6 +500,8 @@ mod tests {
     fn two_consecutive_timeouts_become_unresponsive() {
         let wd = Watchdog::new();
         wd.set_visibility(true);
+        // fix-focus-gate-edges: penalty path requires observed focus (default is exempt)
+        wd.set_app_focused(true);
         wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(1));
 
         // First timeout - should increment counter but stay healthy
@@ -495,6 +526,8 @@ mod tests {
     fn heartbeat_during_unresponsive_recovers() {
         let wd = Watchdog::new();
         wd.set_visibility(true);
+        // fix-focus-gate-edges: penalty path requires observed focus (default is exempt)
+        wd.set_app_focused(true);
         wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(1));
 
         // Become unresponsive
@@ -519,6 +552,8 @@ mod tests {
     fn recovered_returns_to_healthy_on_next_check() {
         let wd = Watchdog::new();
         wd.set_visibility(true);
+        // fix-focus-gate-edges: penalty path requires observed focus (default is exempt)
+        wd.set_app_focused(true);
         wd.set_state(WatchdogState::Recovered);
 
         // Record heartbeat to stay healthy
@@ -544,6 +579,8 @@ mod tests {
     fn hidden_panel_resets_timeout_counter() {
         let wd = Watchdog::new();
         wd.set_visibility(true);
+        // fix-focus-gate-edges: penalty path requires observed focus (default is exempt)
+        wd.set_app_focused(true);
         wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(1));
 
         // One timeout while visible
@@ -753,6 +790,10 @@ mod tests {
     }
 
     /// FIX (visibility-gate): After app regains focus, normal checking resumes.
+    /// fix-focus-gate-edges: refocus grants a heartbeat grace period (WebKit resume
+    /// + JS context rebuild can take up to one heartbeat interval). The stale
+    /// pre-suspension heartbeat must NOT be penalized across the refocus edge;
+    /// checking resumes for heartbeats that go stale AFTER the refocus.
     #[test]
     fn refocused_app_resumes_checking() {
         let wd = Watchdog::new();
@@ -764,13 +805,18 @@ mod tests {
         assert!(wd.check().is_none());
         assert_eq!(wd.get_consecutive_timeouts(), 0);
 
-        // App regains focus
+        // App regains focus — grace period resets the stale heartbeat
         wd.set_app_focused(true);
+        assert!(wd.check().is_none(), "Grace period must absorb stale heartbeat at refocus");
+        assert!(wd.check().is_none(), "Second check within grace is also clean");
+        assert_eq!(wd.get_consecutive_timeouts(), 0);
+        assert_eq!(wd.get_state(), WatchdogState::Healthy);
 
-        // Now the stale heartbeat should be penalized
+        // A heartbeat that goes stale AFTER refocus is a genuine freeze and
+        // must still be detected (grace must not mask real hangs)
+        wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(1));
         assert!(wd.check().is_none(), "First timeout increments counter");
         assert_eq!(wd.get_consecutive_timeouts(), 1);
-
         assert!(wd.check().is_some(), "Second timeout triggers unresponsive");
         assert_eq!(wd.get_state(), WatchdogState::Unresponsive);
     }
@@ -809,5 +855,63 @@ mod tests {
         let change = wd.check();
         assert!(change.is_some(), "Should detect unresponsive when app is focused");
         assert_eq!(wd.get_state(), WatchdogState::Unresponsive);
+    }
+
+    // === Regression tests for fix-focus-gate-edges ===
+
+    /// FIX (fix-focus-gate-edges): Unknown focus state must exempt, not penalize.
+    /// Models the observed production pattern (2026-09-09 sessions): panel shown,
+    /// heartbeat stops, but no Focused(true) was ever observed (non-activating
+    /// show / missed focus events). With the old default (app_focused=true), the
+    /// watchdog penalized these misses and emitted false diag_webview_unresponsive.
+    #[test]
+    fn never_focused_panel_exempt_from_penalty() {
+        let wd = Watchdog::new();
+        wd.set_visibility(true); // Panel visible on screen
+        // NOTE: no set_app_focused call — focus state unknown (defaults to exempt)
+
+        // Heartbeat stale far beyond threshold
+        wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(30));
+
+        // Repeated checks must not penalize while focus was never observed
+        for _ in 0..4 {
+            assert!(wd.check().is_none(), "Unknown focus state must not penalize");
+        }
+        assert_eq!(wd.get_consecutive_timeouts(), 0);
+        assert_eq!(wd.get_state(), WatchdogState::Healthy);
+    }
+
+    /// FIX (fix-focus-gate-edges): Focus loss mid-session keeps the exemption even
+    /// after many checks (WebKit suspension can last minutes), and the focus-gain
+    /// grace period absorbs the WebKit-resume window on the way back.
+    #[test]
+    fn suspend_resume_cycle_emits_no_false_positive() {
+        let wd = Watchdog::new();
+        wd.set_visibility(true);
+        wd.set_app_focused(true);
+        wd.record_heartbeat();
+
+        // App loses focus — WebKit suspends WebContent, heartbeat stops
+        wd.set_app_focused(false);
+        wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(20));
+
+        // Suspension lasts well past the threshold — exempt throughout
+        for _ in 0..4 {
+            assert!(wd.check().is_none(), "Suspended webview must stay exempt");
+        }
+        assert_eq!(wd.get_state(), WatchdogState::Healthy);
+
+        // User refocuses the app — grace period absorbs the resume window
+        // (first heartbeat_ping after resume can take up to one interval, ~15s)
+        wd.set_app_focused(true);
+        assert!(wd.check().is_none(), "Refocus grace must absorb stale heartbeat");
+        assert!(wd.check().is_none());
+        assert_eq!(wd.get_consecutive_timeouts(), 0);
+        assert_eq!(wd.get_state(), WatchdogState::Healthy);
+
+        // JS heartbeat resumes — healthy from here on
+        wd.record_heartbeat();
+        assert!(wd.check().is_none());
+        assert_eq!(wd.get_state(), WatchdogState::Healthy);
     }
 }
