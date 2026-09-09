@@ -15,7 +15,7 @@ use std::time::Duration;
 /// - `api_key` field (PostHog body authentication)
 /// - `event` = "diag_rust_panic"
 /// - `distinct_id` = install_id
-/// - `properties` with error_code, message (truncated), backtrace (truncated), session_id, source, environment, platform, arch, app_version
+/// - `properties` with error_code, message (truncated), backtrace (truncated), session_id, source, environment, platform, arch, app_version, build_sha
 pub(crate) fn build_panic_event(
     api_key: &str,
     install_id: &str,
@@ -44,6 +44,10 @@ pub(crate) fn build_panic_event(
             "platform": std::env::consts::OS,
             "arch": std::env::consts::ARCH,
             "app_version": app_version,
+            // Build identifier for build attribution (fix-build-attribution).
+            // Panic events bypass posthog_capture's baseline injection, so the
+            // compile-time const is referenced directly.
+            "build_sha": crate::BUILD_SHA,
         }
     })
 }
@@ -276,6 +280,25 @@ mod tests {
         assert!(app_version.is_some(), "app_version must be present in properties");
         assert!(!app_version.unwrap().is_empty(), "app_version must not be empty");
         assert_eq!(app_version.unwrap(), "0.2.4");
+    }
+
+    #[test]
+    fn build_panic_event_includes_build_sha() {
+        // fix-build-attribution: panic events bypass posthog_capture's baseline
+        // injection, so build_sha must be attached explicitly and never be empty.
+        let event = build_panic_event(
+            "api_key",
+            "desktop-test-id",
+            "session-123",
+            "test panic",
+            "test bt",
+            "0.2.4",
+        );
+
+        let build_sha = event["properties"]["build_sha"].as_str();
+        assert!(build_sha.is_some(), "build_sha must be present in properties");
+        assert!(!build_sha.unwrap().is_empty(), "build_sha must not be empty");
+        assert_eq!(build_sha.unwrap(), crate::BUILD_SHA);
     }
 
     #[test]

@@ -52,12 +52,15 @@ All events **must** include baseline properties (P0 implemented in PR #41):
 | Property | Type | Example | Description |
 |----------|------|---------|-------------|
 | `app_version` | string | `"0.2.4"` | SemVer from `tauri.conf.json` |
+| `build_sha` | string | `"ac9f5e2"` | Git commit SHA injected at compile time by `build.rs` (fix-build-attribution, 2026-09-09) |
 | `environment` | string | `"production"` | `production` / `development` |
 | `session_id` | string | uuidv7 | Current launch ID |
 | `source` | string | `"rust_native"` / `"webview"` | Event origin layer |
 | `platform` | string | `"macos"` / `"windows"` / `"linux"` | Operating system |
 | `arch` | string | `"aarch64"` / `"x86_64"` | CPU architecture |
 | `identity_degraded` | boolean | `false` | (JS side) True when install_id IO failed at startup |
+
+**Build attribution** (fix-build-attribution, 2026-09-09): `app_version` alone cannot distinguish two builds that share a version number — e.g. a pre-fix and a post-fix build of unreleased `0.2.4` main. On 2026-09-09 a fix-verification probe consequently attributed `diag_webview_unresponsive` events from a stale, pre-fix 0.2.4 build to the already-merged fix (#88), producing a false regression alarm (Issue #89). Every event now carries `build_sha` (git commit SHA, resolution: `MENCBO_BUILD_SHA` env override → `git rev-parse --short HEAD` → `"unknown"`). Rust injects it in `posthog_capture` baseline properties and `panic_sender`; the webview receives it via the `analytics_identity` bridge (`buildSha` field) and registers it through `posthog.register`. Fix-verification queries must filter on `build_sha`, not `app_version` alone.
 
 **Additional context properties** (automatically attached by Rust layer):
 - `os_version`: OS version string (e.g., `"14.5"` for macOS, `"10.0.19045"` for Windows). Provided by `os_info` crate.
@@ -191,6 +194,7 @@ When the app loses focus (user switches to another app), macOS WebKit may suspen
 - **Sleep/wake safety**: Main thread probe uses monotonic `Instant` (not `SystemTime`), so system sleep doesn't produce false `diag_native_main_unresponsive`. Sleep/wake detection runs BEFORE native gate in `check_and_transition`, resetting all state.
 - **Visibility grace period**: `set_visibility(true)` resets `last_heartbeat` to now, preventing false `diag_webview_unresponsive`+`recovered` pairs after hide→show cycles.
 - **WebKit suspension cross-check (2026-09-09 fix-webview-visibility-gate)**: When the app loses focus (user switches to another app), macOS WebKit may suspend the WebContent process, causing `document.visibilityState` to become "hidden" in JS and stopping `heartbeat_ping`. However, the panel window may still be on-screen (`is_visible=true`). To avoid false positives, the watchdog cross-checks app focus state before penalizing heartbeat misses: if `!app_focused && is_visible`, WebKit suspension is expected → exempt from penalty. This prevents false `diag_webview_unresponsive` when the user switches to another app while the panel remains visible.
+- **Focus gate edges (2026-09-09 fix-focus-gate-edges)**: Two edge completions of the cross-check. (1) `app_focused` defaults to `false` — the penalty only applies after a `Focused(true)` event has actually been observed, so an unknown focus state (non-activating panel show, missed focus events) degrades to exemption, the same failure direction as the visibility ruling, instead of silently reverting to pre-cross-check behavior. (2) `set_app_focused(true)` also resets the heartbeat baseline (grace period): on refocus, WebKit must resume the suspended WebContent process and the JS context may be rebuilt, so the first post-resume `heartbeat_ping` can take up to one heartbeat interval (~15s, `setInterval` does not fire immediately). Without the grace period, the two-consecutive-check rule fires a false `diag_webview_unresponsive`+`recovered` pair inside the resume window. Genuine freezes are unaffected — heartbeats stay absent, so detection is only delayed by one threshold period after the click.
 
 **Session marker semantics**: The session marker (for dirty exit detection) is a single-slot file — N consecutive kills only attribute to the most recent session (each new startup overwrites the marker; only the last unclean session's `prev_session_id` is reported).
 

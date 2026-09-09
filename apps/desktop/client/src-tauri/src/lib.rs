@@ -20,6 +20,16 @@ use analytics_events_gen::Event;
 const POSTHOG_KEY: &str = env!("POSTHOG_KEY", "PostHog key must be provided via POSTHOG_KEY env var or defaults to NO_KEY");
 const POSTHOG_HOST: &str = "https://us.i.posthog.com";
 
+/// Build identifier (git commit SHA) injected at compile time by build.rs.
+///
+/// FIX (fix-build-attribution): attached as the `build_sha` baseline property on
+/// every analytics event. `app_version` alone cannot distinguish two builds that
+/// share a version number (e.g. pre-fix and post-fix 0.2.4 main builds), which
+/// made fix-verification probes misattribute events from stale, unreleased builds
+/// to the fix commit (2026-09-09 probe false alarm on diag_webview_unresponsive).
+/// Resolution: MENCBO_BUILD_SHA env override → `git rev-parse --short HEAD` → "unknown".
+pub const BUILD_SHA: &str = env!("MENCBO_BUILD_SHA");
+
 /// Global identity state (install_id + session_id) for this app instance.
 /// Stored in a OnceLock to ensure thread-safe initialization.
 use std::sync::OnceLock;
@@ -209,6 +219,9 @@ fn posthog_capture(event: Event, mut props: serde_json::Value) {
         if let Some(version) = APP_VERSION.get() {
             obj.insert("app_version".to_string(), serde_json::Value::String(version.clone()));
         }
+
+        // Build identifier from compile-time git SHA (fix-build-attribution)
+        obj.insert("build_sha".to_string(), serde_json::Value::String(BUILD_SHA.to_string()));
     }
 
     // Enqueue to batch queue instead of spawning a new thread
@@ -375,6 +388,9 @@ fn identity_payload(install_id: &str, session_id: &str) -> Value {
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "degraded": degraded,
+        // Build identifier so webview-side events carry the same build_sha
+        // baseline as rust_native events (fix-build-attribution)
+        "buildSha": BUILD_SHA,
     })
 }
 
@@ -2047,5 +2063,27 @@ mod tests {
         
         // Both calls must return identical results
         assert_eq!(payload1, payload2, "Pure function must return same output for same input");
+    }
+
+    // ---- build_sha attribution tests (fix-build-attribution) ----
+
+    #[test]
+    fn identity_payload_includes_build_sha() {
+        // The identity bridge must expose buildSha so webview-side events carry
+        // the same build identifier as rust_native events.
+        let payload = identity_payload("desktop-test-uuid", "session-test-uuid");
+
+        let build_sha = payload["buildSha"].as_str();
+        assert!(build_sha.is_some(), "buildSha must be present in identity payload");
+        assert!(!build_sha.unwrap().is_empty(), "buildSha must not be empty");
+        assert_eq!(build_sha.unwrap(), crate::BUILD_SHA);
+    }
+
+    #[test]
+    fn build_sha_compiles_to_non_empty_sentinel_or_sha() {
+        // BUILD_SHA comes from build.rs: MENCBO_BUILD_SHA env override, else
+        // `git rev-parse --short HEAD`, else "unknown". It must never be empty —
+        // an empty value would silently strip attribution from every event.
+        assert!(!crate::BUILD_SHA.is_empty(), "BUILD_SHA must never be empty");
     }
 }

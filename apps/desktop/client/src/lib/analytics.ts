@@ -136,6 +136,7 @@ export async function initAnalytics() {
   let installId = "";
   let sessionId = "";
   let failReason = "";
+  let buildSha = "unknown"; // fix-build-attribution: overwritten by analytics_identity bridge
   let platform = navigator.platform || "unknown";
   let arch = navigator.userAgent?.includes("arm64") || navigator.userAgent?.includes("aarch64")
     ? "aarch64"
@@ -143,7 +144,7 @@ export async function initAnalytics() {
 
   // Step 1: try to fetch identity from Rust (with 3s timeout)
   try {
-    const identityPromise = invoke<{ installId: string; sessionId: string; platform: string; arch: string; degraded?: boolean }>(
+    const identityPromise = invoke<{ installId: string; sessionId: string; platform: string; arch: string; degraded?: boolean; buildSha?: string }>(
       "analytics_identity",
     );
     const timeoutPromise = new Promise<never>((_, reject) =>
@@ -158,6 +159,9 @@ export async function initAnalytics() {
     // Store platform/arch from Rust bridge (Fix 1: navigator.userAgent is unreliable on Apple Silicon)
     platform = identity.platform;
     arch = identity.arch;
+    // fix-build-attribution: build identifier from the same compile-time source
+    // as rust_native events, so both layers attribute to the same commit
+    buildSha = identity.buildSha || "unknown";
   } catch (e) {
     failReason = `invoke_failed: ${String(e).slice(0, 200)}`;
   }
@@ -226,6 +230,9 @@ export async function initAnalytics() {
       source: "webview",
       // Environment properties (VAL-ENV-002/003)
       app_version: appVersion,
+      // fix-build-attribution: same compile-time git SHA as rust_native events,
+      // so webview and rust events attribute to the same commit
+      build_sha: buildSha,
       environment: "production", // JS only runs in release builds after DEV gate
       platform: platform,
       arch: arch,
