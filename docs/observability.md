@@ -177,9 +177,20 @@ All panel events include `panel_id` (derived from session_id) for correlation ac
 | `diag_ipc_timeout` | webview | JS invoke() exceeded timeout threshold | `error_code: E_IPC_TIMEOUT`, `timeout_ms` |
 | `diag_rust_panic` | rust | Panic hook fires (sync send via blocking reqwest) | `message`, `backtrace`, `error_code: E_RUST_PANIC` |
 
+**WebKit suspension behavior (macOS, 2026-09-09)**:
+
+When the app loses focus (user switches to another app), macOS WebKit may suspend the WebContent process. This is normal OS behavior, not a bug:
+
+- **document.visibilityState**: Becomes "hidden" in JS when app is not active, stopping `heartbeat_ping`
+- **Window visibility**: The panel window may remain on-screen (`is_visible=true`) even though WebKit is suspended
+- **Watchdog cross-check**: If `!app_focused && is_visible`, the watchdog exempts heartbeat misses from penalty (prevents false `diag_webview_unresponsive`)
+- **freeze-end prepareToSuspend**: When a freeze is detected and the panel is re-shown (visibility-hold mode), WebKit may call `prepareToSuspend` before suspension. This is handled by the watchdog's grace period mechanism
+- **Same-session secondary js_launch**: After WebKit suspension + resume, the JS context may rebuild, producing a second `js_launch` event in the same session. This is expected and does not indicate a new session
+
 **Watchdog false-positive protections (2026-09-09 fix)**:
 - **Sleep/wake safety**: Main thread probe uses monotonic `Instant` (not `SystemTime`), so system sleep doesn't produce false `diag_native_main_unresponsive`. Sleep/wake detection runs BEFORE native gate in `check_and_transition`, resetting all state.
 - **Visibility grace period**: `set_visibility(true)` resets `last_heartbeat` to now, preventing false `diag_webview_unresponsive`+`recovered` pairs after hide→show cycles.
+- **WebKit suspension cross-check (2026-09-09 fix-webview-visibility-gate)**: When the app loses focus (user switches to another app), macOS WebKit may suspend the WebContent process, causing `document.visibilityState` to become "hidden" in JS and stopping `heartbeat_ping`. However, the panel window may still be on-screen (`is_visible=true`). To avoid false positives, the watchdog cross-checks app focus state before penalizing heartbeat misses: if `!app_focused && is_visible`, WebKit suspension is expected → exempt from penalty. This prevents false `diag_webview_unresponsive` when the user switches to another app while the panel remains visible.
 
 **Session marker semantics**: The session marker (for dirty exit detection) is a single-slot file — N consecutive kills only attribute to the most recent session (each new startup overwrites the marker; only the last unclean session's `prev_session_id` is reported).
 
