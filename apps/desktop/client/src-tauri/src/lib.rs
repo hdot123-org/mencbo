@@ -51,6 +51,12 @@ static CLOSE_PANEL_DIAG_MODE: OnceLock<bool> = OnceLock::new();
 /// Set to true after the first perform_close() call.
 static CLOSE_PANEL_TRIGGERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Visibility-hold flag for freeze_webview diagnostic test (fix-freeze-visibility-panic-retry).
+/// When true, the blur handler skips hide+panel_close so the panel stays visible during freeze.
+/// Set by the freeze_webview thread; cleared when visibility-hold ends.
+/// Normal paths (non-freeze_webview) never touch this flag (always false).
+static FREEZE_VISIBILITY_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Heartbeat sequence counter (标准 §6.1, VAL-REL-006).
 /// Increments monotonically within session_id scope, resets on process restart.
 /// Used to detect missing events: gap ≥10 minutes without filling = lost events.
@@ -926,6 +932,15 @@ pub fn run() {
                     // Guard: only emit panel_close if panel is actually visible
                     // Prevents double-send when tray already closed the panel
                     if panel_for_blur.is_visible().unwrap_or(false) {
+                        // Visibility-hold mode: skip hide+panel_close during freeze_webview
+                        // The freeze thread will re-show the panel automatically
+                        if FREEZE_VISIBILITY_HOLD.load(std::sync::atomic::Ordering::SeqCst) {
+                            eprintln!("[diag] freeze_webview: blur ignored (visibility-hold active)");
+                            // Re-show immediately to counteract the blur
+                            let _ = panel_for_blur.show();
+                            watchdog::Watchdog::global().set_visibility(true);
+                            return;
+                        }
                         let _ = panel_for_blur.hide();
                         watchdog::Watchdog::global().set_visibility(false);
                         posthog_capture(Event::PanelClose, serde_json::json!({ 
@@ -1003,6 +1018,13 @@ pub fn run() {
             // infinite loop via panel.eval() to freeze the webview event loop.
             // This stops heartbeat_ping from being sent, triggering diag_webview_unresponsive.
             // After 90s the JS is unfrozen (eval returns), allowing recovery detection.
+            //
+            // Visibility-hold mode (fix-freeze-visibility-panic-retry):
+            // During freeze injection, the panel must remain visible for ~55s+ to trigger
+            // the watchdog threshold. However, blur/hide events would normally hide the panel,
+            // causing the test to fail. Visibility-hold mode monitors blur/hide and automatically
+            // re-shows the panel during the freeze period, ensuring the diagnostic event fires.
+            // This mode is ONLY active when MENCBO_DIAG_TEST=freeze_webview; normal paths unaffected.
             if std::env::var("MENCBO_DIAG_TEST").map(|v| v == "freeze_webview").unwrap_or(false)
                 && !cfg!(debug_assertions)
             {
@@ -1024,13 +1046,38 @@ pub fn run() {
                         std::thread::sleep(std::time::Duration::from_millis(100));
                     }
                     // Panel is visible, inject infinite loop to freeze JS event loop
-                    eprintln!("[diag] freeze_webview: injecting JS infinite loop (90s freeze)");
+                    eprintln!("[diag] freeze_webview: dispatching JS infinite loop (90s freeze)");
                     // Use eval to inject a synchronous infinite loop
                     // We use a self-terminating version that runs for ~90s then stops
                     let _ = panel_for_freeze.eval(
                         "(function(){ var start=Date.now(); while(Date.now()-start<90000){} })()"
                     );
-                    eprintln!("[diag] freeze_webview: JS infinite loop completed (90s elapsed)");
+                    // Note: eval is non-blocking (fire-and-forget), so this message appears
+                    // immediately after dispatch, not after 90s. The JS runs asynchronously.
+                    eprintln!("[diag] freeze_webview: JS infinite loop dispatched (non-blocking eval)");
+                    
+                    // Visibility-hold mode: monitor panel visibility during freeze period
+                    // If panel becomes hidden (blur/hide), automatically re-show it
+                    // This ensures the diagnostic event fires despite focus changes
+                    eprintln!("[diag] freeze_webview: entering visibility-hold mode");
+                    FREEZE_VISIBILITY_HOLD.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let hold_start = std::time::Instant::now();
+                    let hold_duration = std::time::Duration::from_secs(95); // Slightly longer than freeze
+                    
+                    while hold_start.elapsed() < hold_duration {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        
+                        // Check if panel is visible; if not, re-show it
+                        if let Ok(is_visible) = panel_for_freeze.is_visible() {
+                            if !is_visible {
+                                eprintln!("[diag] freeze_webview: panel hidden, re-showing (visibility-hold)");
+                                let _ = panel_for_freeze.show();
+                                watchdog::Watchdog::global().set_visibility(true);
+                            }
+                        }
+                    }
+                    FREEZE_VISIBILITY_HOLD.store(false, std::sync::atomic::Ordering::SeqCst);
+                    eprintln!("[diag] freeze_webview: visibility-hold mode ended after 95s");
                 });
             }
 
