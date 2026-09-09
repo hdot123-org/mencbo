@@ -48,13 +48,49 @@ pub(crate) fn build_panic_event(
     })
 }
 
+/// Retry logic with bounded attempts and linear backoff.
+/// Pure function: transport is injectable for testing.
+///
+/// - max_attempts: total attempts including the first (e.g. 3 = 1 initial + 2 retries)
+/// - backoff_ms: delay between attempts in milliseconds [500, 1000, ...]
+/// - Total delay bounded: for 3 attempts with [500, 1000], max delay = 1.5s
+///
+/// Returns Ok(()) on first successful attempt, or Err with last error.
+pub(crate) fn send_with_retries(
+    event: &Value,
+    max_attempts: usize,
+    backoff_ms: &[u64],
+    mut send_fn: Box<dyn FnMut(&Value) -> Result<(), String>>,
+) -> Result<(), String> {
+    assert!(max_attempts >= 1, "max_attempts must be at least 1");
+    assert!(
+        backoff_ms.len() >= max_attempts.saturating_sub(1),
+        "backoff_ms must have at least max_attempts-1 entries"
+    );
+
+    for attempt in 0..max_attempts {
+        match send_fn(event) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("[panic_sender] attempt {} failed: {}", attempt + 1, e);
+                if attempt + 1 < max_attempts {
+                    std::thread::sleep(Duration::from_millis(backoff_ms[attempt]));
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Err("all retry attempts exhausted".to_string())
+}
+
 /// Send a panic event synchronously to PostHog.
 ///
 /// This function:
 /// - Truncates message to ≤300 chars (PostHog property limit)
 /// - Extracts backtrace summary (first 500 chars)
-/// - Sends via blocking HTTP POST (bypasses batch queue)
-/// - Uses a short timeout (3s) to avoid hanging the panic handler
+/// - Sends via blocking HTTP POST with bounded retry (3 attempts, linear backoff)
+/// - Total bounded: max 3 attempts × 3s timeout + 1.5s delays = 10.5s worst case
 /// - Skips send when api_key is empty (NO_KEY sentinel guard)
 ///
 /// Called from std::panic::set_hook — must be synchronous and fast.
@@ -75,7 +111,6 @@ pub(crate) fn send_panic_event(
 
     let event = build_panic_event(api_key, install_id, session_id, panic_message, backtrace, app_version);
 
-    // Send via blocking POST (bypass batch queue)
     let url = format!("{}/capture/", host.trim_end_matches('/'));
 
     let client = reqwest::blocking::Client::builder()
@@ -90,21 +125,27 @@ pub(crate) fn send_panic_event(
         }
     };
 
-    match client.post(&url).json(&event).send() {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                eprintln!("[panic_sender] panic event sent successfully");
-            } else {
-                eprintln!(
-                    "[panic_sender] panic event send failed: HTTP {}",
-                    resp.status()
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("[panic_sender] panic event send failed: {}", e);
-        }
-    }
+    // Bounded retry: max 3 attempts, linear backoff [500ms, 1000ms]
+    let backoff_ms = [500u64, 1000u64];
+    let _ = send_with_retries(
+        &event,
+        3,
+        &backoff_ms,
+        Box::new(move |body| {
+            client
+                .post(&url)
+                .json(body)
+                .send()
+                .map_err(|e| e.to_string())
+                .and_then(|resp| {
+                    if resp.status().is_success() {
+                        Ok(())
+                    } else {
+                        Err(format!("HTTP {}", resp.status()))
+                    }
+                })
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -253,5 +294,103 @@ mod tests {
         );
         // If we reach here without panicking, the guard exists
         // In a real scenario, we'd verify no HTTP request was made
+    }
+
+    // ---- Retry logic tests ----
+
+    #[test]
+    fn send_with_retries_succeeds_on_first_attempt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let event = serde_json::json!({"test": "data"});
+
+        let result = send_with_retries(
+            &event,
+            3,
+            &[500, 1000],
+            Box::new(move |_| {
+                attempts_clone.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }),
+        );
+
+        assert!(result.is_ok(), "first attempt success should return Ok");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "should succeed on first attempt");
+    }
+
+    #[test]
+    fn send_with_retries_succeeds_after_first_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let event = serde_json::json!({"test": "data"});
+
+        let result = send_with_retries(
+            &event,
+            3,
+            &[500, 1000],
+            Box::new(move |_| {
+                let attempt = attempts_clone.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    Err("network error".to_string())
+                } else {
+                    Ok(())
+                }
+            }),
+        );
+
+        assert!(result.is_ok(), "retry should succeed");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "should retry after first failure");
+    }
+
+    #[test]
+    fn send_with_retries_fails_after_all_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let event = serde_json::json!({"test": "data"});
+
+        let result = send_with_retries(
+            &event,
+            3,
+            &[500, 1000],
+            Box::new(move |_| {
+                attempts_clone.fetch_add(1, Ordering::SeqCst);
+                Err("persistent error".to_string())
+            }),
+        );
+
+        assert!(result.is_err(), "all attempts should fail");
+        assert_eq!(attempts.load(Ordering::SeqCst), 3, "should try all 3 attempts");
+    }
+
+    #[test]
+    fn send_with_retries_respects_max_attempts() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_clone = attempts.clone();
+        let event = serde_json::json!({"test": "data"});
+
+        let result = send_with_retries(
+            &event,
+            1, // Only 1 attempt, no retries
+            &[], // No backoff needed
+            Box::new(move |_| {
+                attempts_clone.fetch_add(1, Ordering::SeqCst);
+                Err("error".to_string())
+            }),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "should only try once when max_attempts=1");
     }
 }

@@ -367,7 +367,7 @@ MENCBO_DIAG_TEST=<hook_name> pnpm -F desktop-client tauri dev
 | 值 | 用途 | 说明 |
 |----|------|------|
 | `close_panel` | 自动关闭面板 | 面板首次可见后 3 秒触发 `perform_close()`，产生真实的 CloseRequested 事件链（→ `panel_close{via:close}`）。单次触发即止，用于验证 VAL-PAN-003。 |
-| `freeze_webview` | Webview 假死模拟 | 面板可见后通过 `eval` 注入 90 秒 JS while-loop（`while(Date.now()-start<90000){}`），阻塞 JS 事件循环、阻止 JS heartbeat 更新 → 触发 `diag_webview_unresponsive`。**注意**：不是 setInterval，是同步阻塞的 eval while-loop。 |
+| `freeze_webview` | Webview 假死模拟 | 面板可见后通过 `eval` 注入 90 秒 JS while-loop（`while(Date.now()-start<90000){}`），阻塞 JS 事件循环、阻止 JS heartbeat 更新 → 触发 `diag_webview_unresponsive`。**注意**：不是 setInterval，是同步阻塞的 eval while-loop。**Visibility-hold 模式**：注入期间（95s）如果面板因 blur/隐藏事件而消失，会自动 re-show，确保 watchdog 有足够时间检测假死（VAL-DIAG-001 需要 ~55s 持续可见）。仅 `freeze_webview` 激活时有效，正常路径零行为变化。 |
 | `block_main` | 主线程阻塞模拟 | 面板可见后通过 `run_on_main_thread` 注入 90 秒主线程 sleep（**注入时长** 90s）。Watchdog 检测阈值为连续 2 个 5s 检查周期未收到 probe 响应（即 **检测阈值** >10s）。两者是独立概念：注入 90s 确保超过检测阈值，诊断事件在 >10s 时触发而非等到 90s 结束。 |
 | `slow_ipc` | IPC 延迟模拟 | command 执行超时 → 触发 `diag_ipc_timeout` |
 | `panic` | Panic 触发 | 故意 panic → 触发 `diag_rust_panic`（同步直发 PostHog） |
