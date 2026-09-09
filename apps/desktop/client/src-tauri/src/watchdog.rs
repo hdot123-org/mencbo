@@ -89,6 +89,14 @@ pub struct Watchdog {
     last_heartbeat: Mutex<Instant>,
     /// Panel visibility state
     is_visible: AtomicBool,
+    /// App focus state (true when app is active/frontmost)
+    /// FIX (fix-webview-visibility-gate): Cross-check for WebKit suspension.
+    /// When the app is not active, WebKit suspends the WebContent process,
+    /// causing document.visibilityState to become "hidden" and heartbeat_ping to stop.
+    /// But the panel window may still be on-screen (is_visible=true).
+    /// Before penalizing heartbeat misses, check if the app is focused.
+    /// If not focused, WebKit suspension is expected → exempt from penalty.
+    app_focused: AtomicBool,
     /// Current state
     state: Mutex<WatchdogState>,
     /// When unresponsive state started (for freeze_duration_ms)
@@ -115,6 +123,7 @@ impl Watchdog {
         Self {
             last_heartbeat: Mutex::new(now),
             is_visible: AtomicBool::new(false),
+            app_focused: AtomicBool::new(true),
             state: Mutex::new(WatchdogState::Healthy),
             unresponsive_since: Mutex::new(None),
             consecutive_timeouts: Mutex::new(0),
@@ -158,6 +167,25 @@ impl Watchdog {
             // Also reset consecutive timeouts to avoid false positives
             *self.consecutive_timeouts.lock().unwrap() = 0;
         }
+    }
+
+    /// Update app focus state.
+    ///
+    /// FIX (fix-webview-visibility-gate): When the app loses focus (user switches
+    /// to another app), WebKit suspends the WebContent process. This causes
+    /// `document.visibilityState` to become "hidden" in JS, stopping heartbeat_ping.
+    /// However, the panel window may still be on-screen (is_visible=true).
+    ///
+    /// Cross-check: if the panel is visible but the app is not focused, WebKit
+    /// suspension is expected behavior. We exempt this case from heartbeat penalty
+    /// to avoid false diag_webview_unresponsive.
+    pub fn set_app_focused(&self, focused: bool) {
+        self.app_focused.store(focused, Ordering::SeqCst);
+    }
+
+    /// Query app focus state (used by diagnostics and tests).
+    pub fn get_app_focused(&self) -> bool {
+        self.app_focused.load(Ordering::SeqCst)
     }
 
     /// Record a main thread probe response (called from main thread via run_on_main_thread)
@@ -222,6 +250,16 @@ impl Watchdog {
         // Only check heartbeat when panel is visible
         if !self.is_visible.load(Ordering::SeqCst) {
             // Reset consecutive timeouts when hidden (no false positives after show)
+            *self.consecutive_timeouts.lock().unwrap() = 0;
+            return None;
+        }
+
+        // FIX (fix-webview-visibility-gate): Cross-check app focus before penalizing.
+        // If the app is not focused (user switched to another app), WebKit may have
+        // suspended the WebContent process. This is expected behavior on macOS.
+        // Exempt this case from heartbeat penalty to avoid false positives.
+        if !self.app_focused.load(Ordering::SeqCst) {
+            // App not focused → WebKit suspension expected → exempt from penalty
             *self.consecutive_timeouts.lock().unwrap() = 0;
             return None;
         }
@@ -689,5 +727,87 @@ mod tests {
             }
             other => panic!("Expected MainThreadUnresponsive, got {:?}", other),
         }
+    }
+
+    // === Regression tests for fix-webview-visibility-gate ===
+
+    /// FIX (visibility-gate): Panel visible but app not focused → WebKit suspension expected.
+    /// Should NOT penalize heartbeat misses in this case.
+    #[test]
+    fn unfocused_app_skips_heartbeat_check() {
+        let wd = Watchdog::new();
+        wd.set_visibility(true); // Panel is visible (on screen)
+        wd.set_app_focused(false); // But app is not focused (user switched away)
+
+        // Simulate stale heartbeat (would normally trigger unresponsive)
+        wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(1));
+
+        // Should NOT penalize because app is not focused
+        assert!(wd.check().is_none(), "Should not penalize when app is not focused");
+        assert_eq!(wd.get_consecutive_timeouts(), 0, "Timeout counter should be reset");
+        assert_eq!(wd.get_state(), WatchdogState::Healthy, "Should remain healthy");
+
+        // Multiple checks should also be clean
+        assert!(wd.check().is_none());
+        assert_eq!(wd.get_consecutive_timeouts(), 0);
+    }
+
+    /// FIX (visibility-gate): After app regains focus, normal checking resumes.
+    #[test]
+    fn refocused_app_resumes_checking() {
+        let wd = Watchdog::new();
+        wd.set_visibility(true);
+        wd.set_app_focused(false);
+        wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(1));
+
+        // While unfocused: no penalty
+        assert!(wd.check().is_none());
+        assert_eq!(wd.get_consecutive_timeouts(), 0);
+
+        // App regains focus
+        wd.set_app_focused(true);
+
+        // Now the stale heartbeat should be penalized
+        assert!(wd.check().is_none(), "First timeout increments counter");
+        assert_eq!(wd.get_consecutive_timeouts(), 1);
+
+        assert!(wd.check().is_some(), "Second timeout triggers unresponsive");
+        assert_eq!(wd.get_state(), WatchdogState::Unresponsive);
+    }
+
+    /// FIX (visibility-gate): Hidden panel + unfocused app → both gates skip check.
+    #[test]
+    fn hidden_and_unfocused_skips_check() {
+        let wd = Watchdog::new();
+        wd.set_visibility(false); // Panel hidden
+        wd.set_app_focused(false); // App unfocused
+
+        wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(100));
+
+        // Should skip (visibility gate fires first)
+        assert!(wd.check().is_none());
+        assert_eq!(wd.get_consecutive_timeouts(), 0);
+    }
+
+    /// FIX (visibility-gate): Real freeze scenario (focused app) still triggers unresponsive.
+    /// This is the positive test: when app IS focused and heartbeat is stale,
+    /// we should still detect the freeze.
+    #[test]
+    fn focused_app_with_stale_heartbeat_triggers_unresponsive() {
+        let wd = Watchdog::new();
+        wd.set_visibility(true);
+        wd.set_app_focused(true); // App IS focused
+
+        // Simulate stale heartbeat (real freeze)
+        wd.set_last_heartbeat(HEARTBEAT_TIMEOUT + Duration::from_secs(1));
+
+        // First timeout
+        assert!(wd.check().is_none());
+        assert_eq!(wd.get_consecutive_timeouts(), 1);
+
+        // Second timeout → unresponsive
+        let change = wd.check();
+        assert!(change.is_some(), "Should detect unresponsive when app is focused");
+        assert_eq!(wd.get_state(), WatchdogState::Unresponsive);
     }
 }

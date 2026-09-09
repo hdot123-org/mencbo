@@ -928,25 +928,35 @@ pub fn run() {
             // the correct via value (VAL-PAN-001/002/003).
             let panel_for_blur = panel.clone();
             panel.on_window_event(move |e| match e {
-                WindowEvent::Focused(false) => {
-                    // Guard: only emit panel_close if panel is actually visible
-                    // Prevents double-send when tray already closed the panel
-                    if panel_for_blur.is_visible().unwrap_or(false) {
-                        // Visibility-hold mode: skip hide+panel_close during freeze_webview
-                        // The freeze thread will re-show the panel automatically
-                        if FREEZE_VISIBILITY_HOLD.load(std::sync::atomic::Ordering::SeqCst) {
-                            eprintln!("[diag] freeze_webview: blur ignored (visibility-hold active)");
-                            // Re-show immediately to counteract the blur
-                            let _ = panel_for_blur.show();
-                            watchdog::Watchdog::global().set_visibility(true);
-                            return;
+                WindowEvent::Focused(focused) => {
+                    // FIX (fix-webview-visibility-gate): Track app focus state for watchdog cross-check.
+                    // When the app loses focus (user switches to another app), WebKit may suspend
+                    // the WebContent process. This causes document.visibilityState to become "hidden"
+                    // in JS, stopping heartbeat_ping. But the panel window may still be on-screen
+                    // (is_visible=true). Before penalizing heartbeat misses, we cross-check app focus.
+                    watchdog::Watchdog::global().set_app_focused(*focused);
+
+                    if !focused {
+                        // Guard: only emit panel_close if panel is actually visible
+                        // Prevents double-send when tray already closed the panel
+                        if panel_for_blur.is_visible().unwrap_or(false) {
+                            // Visibility-hold mode: skip hide+panel_close during freeze_webview
+                            // The freeze thread will re-show the panel automatically
+                            if FREEZE_VISIBILITY_HOLD.load(std::sync::atomic::Ordering::SeqCst) {
+                                eprintln!("[diag] freeze_webview: blur ignored (visibility-hold active)");
+                                // Re-show immediately to counteract the blur
+                                let _ = panel_for_blur.show();
+                                watchdog::Watchdog::global().set_visibility(true);
+                                // Keep app_focused as false (WebKit suspension expected)
+                                return;
+                            }
+                            let _ = panel_for_blur.hide();
+                            watchdog::Watchdog::global().set_visibility(false);
+                            posthog_capture(Event::PanelClose, serde_json::json!({ 
+                                "via": "blur",
+                                "panel_id": get_panel_id(),
+                            }));
                         }
-                        let _ = panel_for_blur.hide();
-                        watchdog::Watchdog::global().set_visibility(false);
-                        posthog_capture(Event::PanelClose, serde_json::json!({ 
-                            "via": "blur",
-                            "panel_id": get_panel_id(),
-                        }));
                     }
                 }
                 WindowEvent::CloseRequested { api, .. } => {
